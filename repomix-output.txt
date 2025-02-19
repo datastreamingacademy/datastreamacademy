@@ -1,0 +1,5281 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: backend, frontend, venv, .gitignore, implementation_plan.md, next_steps.md, project_plan.md, requirements.txt, start_server_instructions.md
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+
+Additional Info:
+----------------
+
+================================================================
+Directory Structure
+================================================================
+backend/
+  app/
+    auth/
+      dependencies.py
+      google.py
+      oauth_routes.py
+      utils.py
+      validation.py
+    core/
+      config.py
+    routes/
+      lessons.py
+    utils/
+      progress.py
+    check_database.py
+    create_secrets.py
+    database.py
+    fix_migration.py
+    fix_schema.py
+    inspect_db.py
+    main.py
+    migration.py
+    models.py
+    recreate_db.py
+    schemas.py
+    seed.py
+    setup_database.py
+  content/
+    courses/
+      fundamentals/
+        lessons/
+          01_what_is_spark.md
+        video_scripts/
+          01_what_is_spark.md
+  database_backup.json
+frontend/
+  app/
+    auth/
+      callback/
+        page.tsx
+    components/
+      ui/
+        card.tsx
+      CopyButton.tsx
+      CourseCard.tsx
+      CourseProgressDashboard.tsx
+      GoogleLoginButton.tsx
+      LessonContentDisplay.tsx
+      NavHeader.tsx
+      ProtectedRoute.tsx
+    contexts/
+      AuthContext.tsx
+    courses/
+      [id]/
+        page.tsx
+    lessons/
+      [id]/
+        page.tsx
+      page.tsx
+    login/
+      page.tsx
+    globals.css
+    layout.tsx
+    page.tsx
+    types.ts
+  public/
+    file.svg
+    globe.svg
+    next.svg
+    vercel.svg
+    window.svg
+  .gitignore
+  eslint.config.mjs
+  next.config.ts
+  package.json
+  postcss.config.mjs
+  README.md
+  tailwind.config.ts
+  tsconfig.json
+.gitignore
+implementation_plan.md
+next_steps.md
+project_plan.md
+requirements.txt
+
+================================================================
+Files
+================================================================
+
+================
+File: backend/app/auth/dependencies.py
+================
+# backend/app/auth/dependencies.py
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from jose import JWTError, jwt
+from typing import Optional
+
+from ..database import get_db
+from ..models import User
+from ..core.config import settings
+
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="token",
+    auto_error=False  # Don't auto-raise errors for public endpoints
+)
+
+async def get_optional_current_user(
+    token: Optional[str] = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """
+    Get current user if token is valid, otherwise return None.
+    Used for endpoints that can be accessed both authenticated and unauthenticated.
+    """
+    if not token:
+        return None
+
+    try:
+        payload = jwt.decode(
+            token, 
+            settings.SECRET_KEY, 
+            algorithms=["HS256"]
+        )
+        email: str = payload.get("sub")
+        if not email:
+            return None
+    except JWTError:
+        return None
+
+    user = db.query(User).filter(User.email == email).first()
+    return user
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+) -> User:
+    """
+    Get current user or raise 401 error.
+    Used for endpoints that require authentication.
+    """
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        payload = jwt.decode(
+            token, 
+            settings.SECRET_KEY, 
+            algorithms=["HS256"]
+        )
+        email: str = payload.get("sub")
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    return user
+
+async def get_premium_user(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """Check if user has premium access"""
+    # TODO: Add premium status to User model and check it here
+    return current_user
+
+================
+File: backend/app/auth/google.py
+================
+# backend/app/auth/google.py
+import httpx
+from fastapi import HTTPException
+from typing import Optional, Dict, Any
+import json
+from datetime import datetime
+from sqlalchemy.orm import Session
+from ..core.config import settings
+from ..models import User
+
+async def exchange_code_for_token(code: str, redirect_uri: str) -> Dict[str, Any]:
+    """Exchange authorization code for access token."""
+    try:
+        print(f"Exchanging code for token with following parameters:")
+        print(f"Client ID: {settings.GOOGLE_CLIENT_ID}")
+        print(f"Redirect URI: {redirect_uri}")
+        
+        data = {
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code"
+        }
+        
+        print("Making request to Google OAuth token endpoint...")
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data=data,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded"
+                }
+            )
+            
+            if not response.is_success:
+                error_body = response.text
+                print(f"Error response from Google: {error_body}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to exchange code for token: {error_body}"
+                )
+            
+            token_data = response.json()
+            print("Successfully received token data from Google")
+            return token_data
+            
+    except httpx.HTTPError as e:
+        print(f"HTTP error during token exchange: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to exchange code for token: {str(e)}"
+        )
+    except Exception as e:
+        print(f"Unexpected error during token exchange: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error during token exchange: {str(e)}"
+        )
+
+async def verify_google_token(token: str) -> Dict[str, Any]:
+    """Verify Google OAuth token and get user info."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            
+            if not response.is_success:
+                error_body = response.text
+                print(f"Error response from Google userinfo: {error_body}")
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Failed to verify token: {error_body}"
+                )
+            
+            return response.json()
+            
+    except httpx.HTTPError as e:
+        print(f"HTTP error during token verification: {str(e)}")
+        raise HTTPException(
+            status_code=401,
+            detail=f"Failed to verify Google token: {str(e)}"
+        )
+
+def create_or_update_user_from_google(
+    db_session: Session,
+    user_info: Dict[str, Any]
+) -> User:
+    """Create or update user from Google OAuth data."""
+    try:
+        email = user_info.get("email")
+        if not email:
+            raise HTTPException(
+                status_code=400,
+                detail="Email not provided by Google"
+            )
+        
+        # Check if user exists
+        user = db_session.query(User).filter(User.email == email).first()
+        
+        if user:
+            # Update existing user
+            user.google_id = user_info.get("id")
+            user.name = user_info.get("name")
+            user.picture = user_info.get("picture")
+            user.email_verified = user_info.get("verified_email", False)
+            user.updated_at = datetime.utcnow()
+        else:
+            # Create new user
+            user = User(
+                email=email,
+                username=email.split("@")[0],  # Use email prefix as username
+                google_id=user_info.get("id"),
+                name=user_info.get("name"),
+                picture=user_info.get("picture"),
+                is_active=True,
+                email_verified=user_info.get("verified_email", False),
+                is_premium=False  # New users start with free tier
+            )
+            db_session.add(user)
+        
+        db_session.commit()
+        db_session.refresh(user)
+        return user
+        
+    except Exception as e:
+        db_session.rollback()
+        print(f"Error creating/updating user: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create/update user: {str(e)}"
+        )
+
+================
+File: backend/app/auth/oauth_routes.py
+================
+# backend/app/auth/oauth_routes.py
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.orm import Session
+from typing import Any
+import traceback
+
+from ..database import get_db
+from ..models import User
+from ..core.config import settings
+from .google import verify_google_token, exchange_code_for_token, create_or_update_user_from_google
+from .utils import create_access_token
+
+router = APIRouter(prefix="/auth/google", tags=["auth"])
+
+@router.post("/token")
+async def google_auth(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Any:
+    """Handle Google OAuth authentication."""
+    try:
+        # Get request body
+        data = await request.json()
+        code = data.get("code")
+        redirect_uri = data.get("redirect_uri")
+
+        if not code:
+            raise HTTPException(
+                status_code=400,
+                detail="Authorization code is required"
+            )
+
+        print(f"Received auth code: {code[:10]}...")  # Log first 10 chars of code
+        print(f"Redirect URI: {redirect_uri}")
+        print(f"Using client ID: {settings.GOOGLE_CLIENT_ID}")
+
+        # Exchange authorization code for access token
+        token_data = await exchange_code_for_token(code, redirect_uri)
+        access_token = token_data.get("access_token")
+        
+        if not access_token:
+            print("Failed to get access token from Google")
+            raise HTTPException(
+                status_code=400,
+                detail="Could not get access token from Google"
+            )
+
+        print("Successfully got access token from Google")
+        
+        # Get user info from Google
+        user_info = await verify_google_token(access_token)
+        print(f"Got user info from Google: {user_info.get('email')}")
+        
+        # Create or update user in our database
+        user = create_or_update_user_from_google(db, user_info)
+        
+        # Create our own JWT token
+        token = create_access_token(
+            data={
+                "sub": user.email,
+                "google_id": user.google_id
+            }
+        )
+        
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "name": user.name,
+                "picture": user.picture,
+                "is_premium": user.is_premium
+            }
+        }
+        
+    except Exception as e:
+        print(f"Error in google_auth: {str(e)}")
+        print(f"Full error details: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to authenticate with Google: {str(e)}"
+        )
+
+================
+File: backend/app/auth/utils.py
+================
+# backend/app/auth/utils.py
+from datetime import datetime, timedelta
+from typing import Any, Union
+from jose import jwt
+from ..core.config import settings
+
+def create_access_token(
+    data: dict,
+    expires_delta: Union[timedelta, None] = None
+) -> str:
+    """
+    Create a JWT access token.
+    
+    Args:
+        data (dict): Data to encode in the token
+        expires_delta (timedelta, optional): Token expiration time
+        
+    Returns:
+        str: JWT token
+    """
+    to_encode = data.copy()
+    
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(
+            minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        )
+        
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.utcnow()
+    })
+    
+    encoded_jwt = jwt.encode(
+        to_encode, 
+        settings.SECRET_KEY, 
+        algorithm="HS256"
+    )
+    
+    return encoded_jwt
+
+def verify_token(token: str) -> dict[str, Any]:
+    """
+    Verify and decode a JWT token.
+    
+    Args:
+        token (str): JWT token to verify
+        
+    Returns:
+        dict: Decoded token payload
+    """
+    try:
+        decoded_token = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"]
+        )
+        return decoded_token
+    except jwt.JWTError:
+        return None
+
+================
+File: backend/app/auth/validation.py
+================
+# backend/app/auth/validation.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import Optional
+from datetime import datetime
+from jose import JWTError, jwt
+
+from ..database import get_db
+from ..models import User
+from ..core.config import settings
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+async def get_current_user(
+    token: str,
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    try:
+        payload = jwt.decode(
+            token, 
+            settings.SECRET_KEY, 
+            algorithms=["HS256"]
+        )
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return user
+
+@router.get("/validate")
+async def validate_token(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Validate JWT token and return user information"""
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "picture": current_user.picture
+    }
+
+================
+File: backend/app/core/config.py
+================
+# backend/app/core/config.py
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+
+class Settings(BaseSettings):
+    # Base API configs
+    API_V1_STR: str = "/api/v1"
+    PROJECT_NAME: str = "Spark Tutorial API"
+    
+    # Google OAuth configs
+    GOOGLE_CLIENT_ID: str
+    GOOGLE_CLIENT_SECRET: str
+    GOOGLE_OAUTH_URL: str = "https://oauth2.googleapis.com/token"
+    GOOGLE_USER_INFO_URL: str = "https://www.googleapis.com/oauth2/v1/userinfo"
+    
+    # Frontend URL for CORS
+    FRONTEND_URL: str = "http://localhost:3000"
+    
+    # JWT settings
+    SECRET_KEY: str = "your-secret-key-replace-in-production"  # replace in production
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    
+    class Config:
+        env_file = ".env"
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+settings = get_settings()
+
+================
+File: backend/app/routes/lessons.py
+================
+# backend/app/routes/lessons.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from typing import Optional
+
+from ..database import get_db
+from ..models import Lesson, User
+from ..auth.dependencies import get_current_user, get_optional_current_user
+from .. import schemas
+
+router = APIRouter(prefix="/lessons", tags=["lessons"])
+
+@router.get("/{lesson_id}")
+async def get_lesson(
+    lesson_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_current_user)
+):
+    """
+    Get lesson by ID. Premium lessons require authentication.
+    """
+    lesson = db.query(Lesson).filter(Lesson.id == lesson_id).first()
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    
+    # Check premium access
+    if lesson.is_premium and (not current_user or not current_user.is_premium):
+        raise HTTPException(
+            status_code=403,
+            detail="This lesson requires premium access"
+        )
+    
+    return lesson
+
+@router.get("/{lesson_id}/progress")
+async def get_lesson_progress(
+    lesson_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)  # Required auth
+):
+    """
+    Get user's progress for a specific lesson. Requires authentication.
+    """
+    lesson = db.query(Lesson).filter(Lesson.id == lesson_id).first()
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+
+    progress = db.query(UserProgress).filter(
+        UserProgress.lesson_id == lesson_id,
+        UserProgress.user_id == current_user.id
+    ).first()
+
+    return progress or {"is_completed": False, "completed_at": None}
+
+================
+File: backend/app/utils/progress.py
+================
+# backend/app/utils/progress.py
+"""
+Progress tracking utilities for the Spark Tutorial platform.
+This module provides functionality for tracking and managing user progress
+through courses and lessons.
+"""
+from datetime import datetime
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from typing import List, Dict, Optional
+
+from ..models import User, Lesson, Course, UserProgress
+from ..schemas import UserProgressRead
+
+class ProgressTracker:
+    """
+    Utility class for managing user progress tracking
+    """
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_user_lesson_progress(
+        self, 
+        user_id: int, 
+        lesson_id: int
+    ) -> Optional[UserProgress]:
+        """
+        Get a user's progress for a specific lesson
+        """
+        return self.db.query(UserProgress).filter(
+            UserProgress.user_id == user_id,
+            UserProgress.lesson_id == lesson_id
+        ).first()
+
+    def get_course_progress(
+        self, 
+        user_id: int, 
+        course_id: int
+    ) -> Dict:
+        """
+        Calculate user's progress in a specific course
+        """
+        # Get total lessons in course
+        total_lessons = self.db.query(func.count(Lesson.id)).filter(
+            Lesson.course_id == course_id
+        ).scalar()
+
+        # Get completed lessons
+        completed_lessons = self.db.query(func.count(UserProgress.id)).filter(
+            UserProgress.user_id == user_id,
+            UserProgress.is_completed == True,
+            Lesson.course_id == course_id
+        ).join(Lesson).scalar()
+
+        # Get last accessed lesson
+        last_accessed = self.db.query(UserProgress).filter(
+            UserProgress.user_id == user_id,
+            Lesson.course_id == course_id
+        ).join(Lesson).order_by(
+            UserProgress.updated_at.desc()
+        ).first()
+
+        return {
+            "total_lessons": total_lessons,
+            "completed_lessons": completed_lessons,
+            "completion_percentage": (completed_lessons / total_lessons * 100) if total_lessons > 0 else 0,
+            "last_accessed_lesson_id": last_accessed.lesson_id if last_accessed else None,
+            "last_accessed_at": last_accessed.updated_at if last_accessed else None
+        }
+
+    def get_all_courses_progress(
+        self, 
+        user_id: int
+    ) -> List[Dict]:
+        """
+        Get progress for all courses a user has started
+        """
+        courses = self.db.query(Course).all()
+        return [
+            {
+                "course_id": course.id,
+                "course_title": course.title,
+                **self.get_course_progress(user_id, course.id)
+            }
+            for course in courses
+        ]
+
+    def update_lesson_progress(
+        self,
+        user_id: int,
+        lesson_id: int,
+        is_completed: bool = True
+    ) -> UserProgress:
+        """
+        Update or create progress record for a lesson
+        """
+        progress = self.get_user_lesson_progress(user_id, lesson_id)
+        
+        if not progress:
+            progress = UserProgress(
+                user_id=user_id,
+                lesson_id=lesson_id,
+                is_completed=is_completed,
+                completed_at=datetime.utcnow() if is_completed else None
+            )
+            self.db.add(progress)
+        else:
+            progress.is_completed = is_completed
+            progress.completed_at = datetime.utcnow() if is_completed else None
+            progress.updated_at = datetime.utcnow()
+
+        self.db.commit()
+        self.db.refresh(progress)
+        return progress
+
+    def get_next_lesson(
+        self, 
+        user_id: int, 
+        course_id: int
+    ) -> Optional[Lesson]:
+        """
+        Get the next uncompleted lesson in a course
+        """
+        # Get all completed lesson IDs for the user in this course
+        completed_lesson_ids = self.db.query(UserProgress.lesson_id).filter(
+            UserProgress.user_id == user_id,
+            UserProgress.is_completed == True,
+            Lesson.course_id == course_id
+        ).join(Lesson).all()
+        
+        completed_ids = [lid for (lid,) in completed_lesson_ids]
+
+        # Find the first uncompleted lesson
+        next_lesson = self.db.query(Lesson).filter(
+            Lesson.course_id == course_id,
+            ~Lesson.id.in_(completed_ids)
+        ).order_by(Lesson.order).first()
+
+        return next_lesson
+
+================
+File: backend/app/check_database.py
+================
+# backend/app/check_database.py
+from sqlalchemy import inspect
+from app.database import engine, SessionLocal
+from app.models import Base, Course, Lesson, Resource
+
+def check_database():
+    """Check database tables and their contents"""
+    inspector = inspect(engine)
+    session = SessionLocal()
+    
+    try:
+        print("\n=== Database Check ===")
+        
+        # Check if database file exists
+        try:
+            engine.connect()
+            print("✓ Database connection successful")
+        except Exception as e:
+            print(f"✗ Database connection failed: {str(e)}")
+            return False
+
+        # Check if all tables exist
+        existing_tables = inspector.get_table_names()
+        required_tables = ['courses', 'lessons', 'resources', 'lesson_prerequisites']
+        
+        print("\nChecking tables:")
+        for table in required_tables:
+            if table in existing_tables:
+                print(f"✓ Table '{table}' exists")
+            else:
+                print(f"✗ Table '{table}' is missing")
+                return False
+
+        # Check if tables have content
+        print("\nChecking table contents:")
+        course_count = session.query(Course).count()
+        lesson_count = session.query(Lesson).count()
+        resource_count = session.query(Resource).count()
+        
+        print(f"- Courses: {course_count}")
+        print(f"- Lessons: {lesson_count}")
+        print(f"- Resources: {resource_count}")
+        
+        if course_count == 0:
+            print("✗ No courses found - database needs to be seeded")
+            return False
+            
+        print("\n✓ Database check completed successfully")
+        return True
+
+    except Exception as e:
+        print(f"\n✗ Error during database check: {str(e)}")
+        return False
+    finally:
+        session.close()
+
+if __name__ == "__main__":
+    check_database()
+
+================
+File: backend/app/create_secrets.py
+================
+import secrets; 
+
+print(secrets.token_urlsafe(32))
+
+================
+File: backend/app/database.py
+================
+# backend/app/database.py
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+SQLALCHEMY_DATABASE_URL = "sqlite:///./spark_tutorial.db"
+
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+================
+File: backend/app/fix_migration.py
+================
+# backend/app/fix_migration.py
+from sqlalchemy import text
+from datetime import datetime
+from app.database import engine, SessionLocal
+
+def fix_database():
+    """Add missing timestamp columns to tables"""
+    db = SessionLocal()
+    try:
+        print("Adding timestamp columns to tables...")
+        
+        # Add timestamps to courses table
+        print("Fixing courses table...")
+        try:
+            db.execute(text("ALTER TABLE courses ADD COLUMN created_at TIMESTAMP"))
+            db.execute(text("ALTER TABLE courses ADD COLUMN updated_at TIMESTAMP"))
+        except Exception as e:
+            print(f"Note: {str(e)}")  # SQLite might complain if columns exist
+            
+        # Add timestamps to lessons table
+        print("Fixing lessons table...")
+        try:
+            db.execute(text("ALTER TABLE lessons ADD COLUMN created_at TIMESTAMP"))
+            db.execute(text("ALTER TABLE lessons ADD COLUMN updated_at TIMESTAMP"))
+        except Exception as e:
+            print(f"Note: {str(e)}")
+            
+        # Add timestamps to resources table
+        print("Fixing resources table...")
+        try:
+            db.execute(text("ALTER TABLE resources ADD COLUMN created_at TIMESTAMP"))
+            db.execute(text("ALTER TABLE resources ADD COLUMN updated_at TIMESTAMP"))
+        except Exception as e:
+            print(f"Note: {str(e)}")
+            
+        # Update all existing records with current timestamp
+        current_time = datetime.utcnow()
+        
+        print("Updating existing records with timestamps...")
+        for table in ['courses', 'lessons', 'resources']:
+            db.execute(
+                text(f"UPDATE {table} SET created_at = :time, updated_at = :time"),
+                {"time": current_time}
+            )
+        
+        db.commit()
+        print("Database fix completed successfully!")
+        return True
+        
+    except Exception as e:
+        print(f"Error during database fix: {str(e)}")
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    print("Starting database fix...")
+    fix_database()
+
+================
+File: backend/app/fix_schema.py
+================
+# backend/app/fix_schema.py
+from sqlalchemy import text
+from app.database import engine, SessionLocal
+
+def fix_schema():
+    """Add all missing columns to the database tables"""
+    db = SessionLocal()
+    try:
+        print("Adding missing columns to lessons table...")
+        
+        # New columns for lessons table
+        lesson_columns = [
+            ("summary", "TEXT"),
+            ("content_sections", "TEXT"),
+            ("code_samples", "TEXT"),
+            ("key_points", "TEXT"),
+            ("skill_level_required", "TEXT"),
+            ("created_at", "TIMESTAMP"),
+            ("updated_at", "TIMESTAMP")
+        ]
+        
+        # Add columns one by one
+        for column_name, column_type in lesson_columns:
+            try:
+                db.execute(text(f"ALTER TABLE lessons ADD COLUMN {column_name} {column_type}"))
+                print(f"Added column {column_name} to lessons table")
+            except Exception as e:
+                print(f"Note: Could not add column {column_name}: {str(e)}")
+        
+        print("\nAdding timestamp columns to other tables...")
+        
+        # Add timestamps to courses and resources
+        for table in ['courses', 'resources']:
+            for column in ['created_at', 'updated_at']:
+                try:
+                    db.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} TIMESTAMP"))
+                    print(f"Added column {column} to {table} table")
+                except Exception as e:
+                    print(f"Note: Could not add column {column} to {table}: {str(e)}")
+        
+        db.commit()
+        print("\nSchema update completed!")
+        return True
+        
+    except Exception as e:
+        print(f"Error during schema update: {str(e)}")
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+def verify_schema():
+    """Verify that all required columns exist"""
+    db = SessionLocal()
+    try:
+        print("\nVerifying schema...")
+        
+        # Test query to check all columns
+        test_queries = [
+            "SELECT title, description, summary, content_sections, code_samples, key_points, created_at, updated_at FROM lessons LIMIT 1",
+            "SELECT title, description, created_at, updated_at FROM courses LIMIT 1",
+            "SELECT title, content, created_at, updated_at FROM resources LIMIT 1"
+        ]
+        
+        for query in test_queries:
+            try:
+                db.execute(text(query))
+                print(f"✓ Query passed: {query}")
+            except Exception as e:
+                print(f"✗ Query failed: {query}")
+                print(f"Error: {str(e)}")
+                return False
+        
+        print("\nSchema verification completed!")
+        return True
+        
+    except Exception as e:
+        print(f"Error during schema verification: {str(e)}")
+        return False
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    print("Starting schema fix...")
+    if fix_schema():
+        verify_schema()
+    print("Done!")
+
+================
+File: backend/app/inspect_db.py
+================
+# backend/app/inspect_db.py
+from sqlalchemy import inspect, text
+from app.database import engine, SessionLocal
+from app.models import Course, Lesson, Resource
+
+def inspect_database():
+    """Inspect the database contents and structure"""
+    db = SessionLocal()
+    try:
+        # Get database inspector
+        inspector = inspect(engine)
+        
+        # Print table structures
+        print("\n=== Database Structure ===")
+        for table_name in inspector.get_table_names():
+            print(f"\nTable: {table_name}")
+            for column in inspector.get_columns(table_name):
+                print(f"  - {column['name']}: {column['type']}")
+        
+        # Count records
+        print("\n=== Record Counts ===")
+        course_count = db.query(Course).count()
+        lesson_count = db.query(Lesson).count()
+        resource_count = db.query(Resource).count()
+        
+        print(f"Courses: {course_count}")
+        print(f"Lessons: {lesson_count}")
+        print(f"Resources: {resource_count}")
+        
+        # Print course details if any exist
+        if course_count > 0:
+            print("\n=== Course Details ===")
+            courses = db.query(Course).all()
+            for course in courses:
+                print(f"\nCourse ID: {course.id}")
+                print(f"Title: {course.title}")
+                print(f"Description: {course.description}")
+                print(f"Order: {course.order}")
+                print(f"Is Premium: {course.is_premium}")
+                
+                # Try to access timestamps
+                try:
+                    print(f"Created At: {course.created_at}")
+                    print(f"Updated At: {course.updated_at}")
+                except Exception as e:
+                    print(f"Error accessing timestamps: {str(e)}")
+        
+    except Exception as e:
+        print(f"Error during inspection: {str(e)}")
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    print("Starting database inspection...")
+    inspect_database()
+    print("\nInspection complete!")
+
+================
+File: backend/app/main.py
+================
+# backend/app/main.py
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from typing import List, Optional
+import traceback
+from datetime import datetime
+
+# Import models, schemas, and dependencies
+from . import models, schemas
+from .database import engine, get_db
+from .core.config import settings
+from .auth.oauth_routes import router as oauth_router
+from .auth.validation import router as validation_router
+from .auth.dependencies import get_current_user, get_optional_current_user
+from .utils.progress import ProgressTracker
+
+# Import necessary types
+from .models import User, Lesson, Course
+
+# Create database tables
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="Spark Tutorial API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(oauth_router)
+app.include_router(validation_router)
+
+# Add a health check endpoint
+@app.get("/")
+async def health_check():
+    return {
+        "status": "healthy",
+        "message": "Backend server is running"
+    }
+
+# Course endpoints
+@app.get("/courses")
+def get_courses(
+    skip: int = 0, 
+    limit: int = 100, 
+    db: Session = Depends(get_db)
+):
+    try:
+        print("\n=== Fetching Courses ===")
+        print("Querying database...")
+        
+        # Get courses with explicit columns
+        courses = db.query(
+            models.Course.id,
+            models.Course.title,
+            models.Course.description,
+            models.Course.order,
+            models.Course.is_premium
+        ).order_by(models.Course.order).offset(skip).limit(limit).all()
+        
+        print(f"Found {len(courses) if courses else 0} courses")
+        
+        # Convert to list of dictionaries
+        courses_data = [
+            {
+                "id": course.id,
+                "title": course.title,
+                "description": course.description,
+                "order": course.order,
+                "is_premium": course.is_premium,
+            }
+            for course in courses
+        ]
+        
+        print("Courses data:", courses_data)
+        
+        return {"courses": courses_data}
+        
+    except Exception as e:
+        print("\n=== Error in /courses endpoint ===")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        print("\nTraceback:")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Internal server error",
+                "error_type": type(e).__name__,
+                "error_details": str(e)
+            }
+        )
+
+@app.get("/courses/{course_id}")
+def get_course(course_id: int, db: Session = Depends(get_db)):
+    try:
+        print(f"\nFetching course with ID: {course_id}")
+        course = db.query(models.Course)\
+            .filter(models.Course.id == course_id)\
+            .first()
+            
+        if course is None:
+            print(f"Course {course_id} not found")
+            raise HTTPException(status_code=404, detail="Course not found")
+            
+        print(f"Found course: {course.title}")
+        
+        # Convert to dict for consistency
+        course_data = {
+            "id": course.id,
+            "title": course.title,
+            "description": course.description,
+            "order": course.order,
+            "is_premium": course.is_premium
+        }
+        
+        return course_data
+        
+    except Exception as e:
+        print(f"Error fetching course {course_id}: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Lesson endpoints
+@app.get("/lessons", response_model=List[schemas.LessonRead])
+def get_lessons(
+    skip: int = 0, 
+    limit: int = 100,
+    course_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    try:
+        print("\n=== Fetching Lessons ===")
+        query = db.query(models.Lesson)
+        
+        # Optional filtering by course
+        if course_id is not None:
+            query = query.filter(models.Lesson.course_id == course_id)
+        
+        # Order and paginate
+        lessons = query\
+            .order_by(models.Lesson.order)\
+            .offset(skip)\
+            .limit(limit)\
+            .all()
+        
+        print(f"Found {len(lessons)} lessons")
+        
+        return lessons
+        
+    except Exception as e:
+        print(f"Error fetching lessons: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/lessons/{lesson_id}")
+def get_lesson(lesson_id: int, db: Session = Depends(get_db)):
+    try:
+        print(f"\nFetching lesson with ID: {lesson_id}")
+        lesson = db.query(models.Lesson)\
+            .filter(models.Lesson.id == lesson_id)\
+            .first()
+            
+        if lesson is None:
+            print(f"Lesson {lesson_id} not found")
+            raise HTTPException(status_code=404, detail="Lesson not found")
+        
+        print(f"Found lesson: {lesson.title}")
+        
+        # Convert to dict for consistent serialization
+        lesson_data = {
+            "id": lesson.id,
+            "title": lesson.title,
+            "description": lesson.description,
+            "content": lesson.content,
+            "content_sections": lesson.content_sections or [],
+            "code_samples": lesson.code_samples or [],
+            "key_points": lesson.key_points,
+            "order": lesson.order,
+            "difficulty": lesson.difficulty.value if lesson.difficulty else "beginner",
+            "lesson_type": lesson.lesson_type.value if lesson.lesson_type else "theory",
+            "estimated_time": lesson.estimated_time,
+            "learning_objectives": lesson.learning_objectives,
+            "is_premium": lesson.is_premium,
+            "course_id": lesson.course_id
+        }
+        
+        return lesson_data
+        
+    except Exception as e:
+        print(f"Error fetching lesson {lesson_id}: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/lessons/{lesson_id}/resources")
+def get_lesson_resources(lesson_id: int, db: Session = Depends(get_db)):
+    try:
+        print(f"\nFetching resources for lesson ID: {lesson_id}")
+        resources = db.query(models.Resource)\
+            .filter(models.Resource.lesson_id == lesson_id)\
+            .all()
+            
+        resources_data = [
+            {
+                "id": resource.id,
+                "title": resource.title,
+                "type": resource.type,
+                "content": resource.content,
+                "description": resource.description if hasattr(resource, 'description') else None
+            }
+            for resource in resources
+        ]
+        
+        print(f"Found {len(resources_data)} resources")
+        return {"resources": resources_data}
+        
+    except Exception as e:
+        print(f"Error fetching resources for lesson {lesson_id}: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/lessons/{lesson_id}/navigation")
+def get_lesson_navigation(lesson_id: int, db: Session = Depends(get_db)):
+    try:
+        print(f"\nFetching navigation for lesson ID: {lesson_id}")
+        current_lesson = db.query(models.Lesson)\
+            .filter(models.Lesson.id == lesson_id)\
+            .first()
+            
+        if not current_lesson:
+            print(f"Lesson {lesson_id} not found")
+            raise HTTPException(status_code=404, detail="Lesson not found")
+        
+        # Find previous lesson in same course
+        prev_lesson = db.query(models.Lesson)\
+            .filter(
+                models.Lesson.course_id == current_lesson.course_id,
+                models.Lesson.order < current_lesson.order
+            )\
+            .order_by(models.Lesson.order.desc())\
+            .first()
+        
+        # Find next lesson in same course
+        next_lesson = db.query(models.Lesson)\
+            .filter(
+                models.Lesson.course_id == current_lesson.course_id,
+                models.Lesson.order > current_lesson.order
+            )\
+            .order_by(models.Lesson.order.asc())\
+            .first()
+        
+        navigation_data = {
+            "previous": {
+                "id": prev_lesson.id,
+                "title": prev_lesson.title
+            } if prev_lesson else None,
+            "next": {
+                "id": next_lesson.id,
+                "title": next_lesson.title
+            } if next_lesson else None
+        }
+        
+        print("Navigation data:", navigation_data)
+        return navigation_data
+        
+    except Exception as e:
+        print(f"Error fetching lesson navigation for lesson {lesson_id}: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/courses/{course_id}/lessons")
+def get_course_lessons(course_id: int, db: Session = Depends(get_db)):
+    try:
+        print(f"\nFetching lessons for course ID: {course_id}")
+        lessons = db.query(models.Lesson)\
+            .filter(models.Lesson.course_id == course_id)\
+            .order_by(models.Lesson.order)\
+            .all()
+            
+        print(f"Found {len(lessons)} lessons")
+        
+        # Convert to list of dicts
+        lessons_data = [
+            {
+                "id": lesson.id,
+                "title": lesson.title,
+                "description": lesson.description,
+                "content": lesson.content,
+                "order": lesson.order,
+                "difficulty": lesson.difficulty.value if lesson.difficulty else "beginner",
+                "lesson_type": lesson.lesson_type.value if lesson.lesson_type else "theory",
+                "estimated_time": lesson.estimated_time,
+                "learning_objectives": lesson.learning_objectives,
+                "is_premium": lesson.is_premium
+            }
+            for lesson in lessons
+        ]
+        
+        return {"lessons": lessons_data}
+        
+    except Exception as e:
+        print(f"Error fetching lessons for course {course_id}: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Progress tracking endpoints
+@app.post("/lessons/{lesson_id}/progress", response_model=schemas.UserProgressRead)
+def update_lesson_progress(
+    lesson_id: int, 
+    is_completed: bool = True,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update progress for a specific lesson for the authenticated user.
+    """
+    try:
+        # Check if lesson exists
+        lesson = db.query(Lesson).filter(Lesson.id == lesson_id).first()
+        if not lesson:
+            raise HTTPException(status_code=404, detail="Lesson not found")
+        
+        # Use ProgressTracker to update lesson progress
+        progress_tracker = ProgressTracker(db)
+        progress = progress_tracker.update_lesson_progress(
+            user_id=current_user.id,
+            lesson_id=lesson_id,
+            is_completed=is_completed
+        )
+        
+        return progress
+    
+    except Exception as e:
+        print(f"Error updating lesson progress: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not update lesson progress")
+
+@app.get("/lessons/{lesson_id}/progress", response_model=Optional[schemas.UserProgressRead])
+def get_lesson_progress(
+    lesson_id: int, 
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieve progress for a specific lesson for the authenticated user.
+    """
+    try:
+        progress_tracker = ProgressTracker(db)
+        progress = progress_tracker.get_user_lesson_progress(
+            user_id=current_user.id,
+            lesson_id=lesson_id
+        )
+        
+        return progress
+    
+    except Exception as e:
+        print(f"Error fetching lesson progress: {str(e)}")
+        raise HTTPException(status_code=500, detail="Could not retrieve lesson progress")
+
+@app.get("/courses/{course_id}/progress", response_model=dict)
+def get_course_progress(
+    course_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get overall progress for a specific course.
+    """
+    try:
+        progress_tracker = ProgressTracker(db)
+        course_progress = progress_tracker.get_course_progress(
+            user_id=current_user.id,
+            course_id=course_id
+        )
+        
+        return course_progress
+    
+    except Exception as e:
+        print(f"Error fetching course progress: {str(e)}")
+        raise HTTPException(status_code=500, detail="Could not retrieve course progress")
+
+@app.get("/progress", response_model=List[dict])
+def get_all_courses_progress(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get progress for all courses a user has started.
+    """
+    try:
+        progress_tracker = ProgressTracker(db)
+        all_courses_progress = progress_tracker.get_all_courses_progress(
+            user_id=current_user.id
+        )
+        
+        return all_courses_progress
+    
+    except Exception as e:
+        print(f"Error fetching all courses progress: {str(e)}")
+        raise HTTPException(status_code=500, detail="Could not retrieve courses progress")
+
+================
+File: backend/app/migration.py
+================
+# backend/app/migration.py
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from .models import Base, Course, Lesson, Resource, lesson_prerequisites
+import json
+from datetime import datetime
+
+# Use the same database URL as in database.py
+SQLALCHEMY_DATABASE_URL = "sqlite:///./spark_tutorial.db"
+
+def migrate_database():
+    # Create engine and session
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL,
+        connect_args={"check_same_thread": False}
+    )
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+
+    try:
+        # Step 1: Backup existing data
+        print("Backing up existing data...")
+        courses = session.query(Course).all()
+        lessons = session.query(Lesson).all()
+        resources = session.query(Resource).all()
+
+        backup_data = {
+            "courses": [
+                {
+                    "id": c.id,
+                    "title": c.title,
+                    "description": c.description,
+                    "order": c.order,
+                    "is_premium": c.is_premium,
+                    "category": c.category.value if c.category else None
+                } for c in courses
+            ],
+            "lessons": [
+                {
+                    "id": l.id,
+                    "title": l.title,
+                    "description": l.description,
+                    "content": l.content,
+                    "order": l.order,
+                    "difficulty": l.difficulty.value if l.difficulty else None,
+                    "lesson_type": l.lesson_type.value if l.lesson_type else None,
+                    "estimated_time": l.estimated_time,
+                    "learning_objectives": l.learning_objectives,
+                    "is_premium": l.is_premium,
+                    "course_id": l.course_id
+                } for l in lessons
+            ],
+            "resources": [
+                {
+                    "id": r.id,
+                    "title": r.title,
+                    "type": r.type,
+                    "content": r.content,
+                    "lesson_id": r.lesson_id
+                } for r in resources
+            ]
+        }
+
+        with open('database_backup.json', 'w') as f:
+            json.dump(backup_data, f, indent=2)
+
+        # Step 2: Run any necessary migrations
+        current_time = datetime.utcnow()
+        
+        print("Database migration completed successfully!")
+
+    except Exception as e:
+        print(f"Error during migration: {str(e)}")
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+if __name__ == "__main__":
+    print("Starting database migration...")
+    migrate_database()
+    print("Migration complete!")
+
+================
+File: backend/app/models.py
+================
+# backend/app/models.py
+from sqlalchemy import (
+    Boolean, Column, Integer, String, Text, ForeignKey, 
+    Enum, JSON, DateTime, Table, UniqueConstraint
+)
+from sqlalchemy.orm import declarative_base, relationship
+from datetime import datetime
+import enum
+from passlib.hash import bcrypt
+
+Base = declarative_base()
+
+class CourseCategory(str, enum.Enum):
+    SPARK = "spark"
+    API = "api"
+    PYTHON = "python"
+    DATA_SCIENCE = "data_science"
+    WEB_DEVELOPMENT = "web_development"
+
+class ContentFormat(str, enum.Enum):
+    CODE = "code"
+    TEXT = "text"
+    VIDEO = "video"
+    EXERCISE = "exercise"
+    QUIZ = "quiz"
+    API_PLAYGROUND = "api_playground"
+    INTERACTIVE_DEMO = "interactive_demo"
+
+class DifficultyLevel(str, enum.Enum):
+    BEGINNER = "beginner"
+    INTERMEDIATE = "intermediate"
+    ADVANCED = "advanced"
+
+class LessonType(str, enum.Enum):
+    THEORY = "theory"
+    HANDS_ON = "hands_on"
+    PROJECT = "project"
+    CASE_STUDY = "case_study"
+
+# Association table for lesson prerequisites
+lesson_prerequisites = Table(
+    'lesson_prerequisites', Base.metadata,
+    Column('lesson_id', Integer, ForeignKey('lessons.id'), primary_key=True),
+    Column('prerequisite_id', Integer, ForeignKey('lessons.id'), primary_key=True)
+)
+
+class Course(Base):
+    __tablename__ = "courses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, index=True)
+    description = Column(String)
+    order = Column(Integer)
+    is_premium = Column(Boolean, default=False)
+    category = Column(Enum(CourseCategory), nullable=False, default=CourseCategory.SPARK)
+    tags = Column(JSON)
+    prerequisites = Column(JSON)
+    target_audience = Column(String)
+    learning_outcomes = Column(JSON)
+    supported_content_formats = Column(JSON)
+    course_metadata = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    lessons = relationship("Lesson", back_populates="course")
+
+class Lesson(Base):
+    __tablename__ = "lessons"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, index=True)
+    description = Column(String)
+    summary = Column(String)
+    content = Column(Text)
+    content_sections = Column(JSON)
+    code_samples = Column(JSON)
+    key_points = Column(Text)
+    order = Column(Integer)
+    difficulty = Column(Enum(DifficultyLevel), default=DifficultyLevel.BEGINNER)
+    lesson_type = Column(Enum(LessonType), default=LessonType.THEORY)
+    content_format = Column(Enum(ContentFormat), default=ContentFormat.TEXT)
+    estimated_time = Column(Integer)  # in minutes
+    skill_level_required = Column(String)
+    learning_objectives = Column(Text)
+    interactive_elements = Column(JSON)
+    external_resources = Column(JSON)
+    practical_application = Column(Text)
+    is_premium = Column(Boolean, default=False)
+    course_id = Column(Integer, ForeignKey("courses.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    course = relationship("Course", back_populates="lessons")
+    resources = relationship("Resource", back_populates="lesson")
+    prerequisites = relationship(
+        "Lesson",
+        secondary=lesson_prerequisites,
+        primaryjoin=id==lesson_prerequisites.c.lesson_id,
+        secondaryjoin=id==lesson_prerequisites.c.prerequisite_id,
+        backref="required_for"
+    )
+
+class Resource(Base):
+    __tablename__ = "resources"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)
+    type = Column(String)
+    content = Column(Text)
+    description = Column(String)
+    lesson_id = Column(Integer, ForeignKey("lessons.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    lesson = relationship("Lesson", back_populates="resources")
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True, nullable=False)
+    email = Column(String, unique=True, index=True, nullable=False)
+    is_active = Column(Boolean, default=True)
+    is_superuser = Column(Boolean, default=False)
+    
+    # New fields for Google OAuth
+    google_id = Column(String, unique=True, nullable=True)
+    name = Column(String, nullable=True)
+    picture = Column(String, nullable=True)
+    email_verified = Column(Boolean, default=False)
+    is_premium = Column(Boolean, default=False)
+    
+    # Make password optional for OAuth users
+    hashed_password = Column(String, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationship with UserProgress
+    progress = relationship("UserProgress", back_populates="user")
+    
+    def set_password(self, password):
+        """Hash and set the password"""
+        self.hashed_password = bcrypt.hash(password)
+    
+    def check_password(self, password):
+        """Verify a password against the stored hash"""
+        return bcrypt.verify(password, self.hashed_password)
+
+class UserProgress(Base):
+    __tablename__ = "user_progress"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    lesson_id = Column(Integer, ForeignKey("lessons.id"))
+    is_completed = Column(Boolean, default=False)
+    completed_at = Column(DateTime, nullable=True)
+    
+    user = relationship("User", back_populates="progress")
+    lesson = relationship("Lesson")
+    
+    def mark_completed(self):
+        """Mark the lesson as completed"""
+        self.is_completed = True
+        self.completed_at = datetime.utcnow()
+
+================
+File: backend/app/recreate_db.py
+================
+# backend/app/recreate_db.py
+from app.database import engine
+from app.models import Base
+from app.seed import seed_data
+
+def recreate_database():
+    """Recreate the database from scratch with the updated schema"""
+    try:
+        print("Dropping all tables...")
+        Base.metadata.drop_all(bind=engine)
+        print("Creating all tables with new schema...")
+        Base.metadata.create_all(bind=engine)
+        print("Seeding database...")
+        seed_data()
+        print("Database recreation completed successfully!")
+        return True
+    except Exception as e:
+        print(f"Error recreating database: {str(e)}")
+        return False
+
+def verify_database():
+    """Verify database schema and contents"""
+    from sqlalchemy import inspect
+    
+    inspector = inspect(engine)
+    
+    print("\nVerifying database schema:")
+    
+    # Check tables
+    tables = inspector.get_table_names()
+    print("\nFound tables:", tables)
+    
+    # Check columns for each table
+    for table in tables:
+        columns = inspector.get_columns(table)
+        print(f"\nColumns in {table}:")
+        for column in columns:
+            print(f"  - {column['name']}: {column['type']}")
+    
+    print("\nSchema verification completed!")
+
+if __name__ == "__main__":
+    print("Starting database recreation...")
+    if recreate_database():
+        verify_database()
+    print("Done!")
+
+================
+File: backend/app/schemas.py
+================
+# backend/app/schemas.py
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from .models import DifficultyLevel, LessonType
+import json
+
+class ContentSection(BaseModel):
+    title: str
+    content: str
+    order: int
+    type: str  # 'text', 'code', 'exercise', etc.
+
+class CodeSample(BaseModel):
+    title: str
+    code: str
+    language: str
+    description: Optional[str] = None
+
+class ResourceBase(BaseModel):
+    title: str
+    type: str
+    content: str
+    description: Optional[str] = None
+
+class ResourceCreate(ResourceBase):
+    lesson_id: int
+
+class ResourceRead(ResourceBase):
+    id: int
+    lesson_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class LessonBase(BaseModel):
+    title: str
+    description: str
+    summary: str
+    content: str
+    content_sections: Optional[List[Dict[str, Any]]] = []
+    code_samples: Optional[List[Dict[str, Any]]] = []
+    key_points: Optional[str] = None
+    order: int
+    difficulty: DifficultyLevel
+    lesson_type: LessonType
+    estimated_time: int
+    skill_level_required: Optional[str] = None
+    learning_objectives: str
+    is_premium: bool = False
+
+class LessonCreate(LessonBase):
+    course_id: int
+    prerequisite_ids: Optional[List[int]] = []
+
+class LessonUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    summary: Optional[str] = None
+    content: Optional[str] = None
+    content_sections: Optional[List[Dict[str, Any]]] = None
+    code_samples: Optional[List[Dict[str, Any]]] = None
+    key_points: Optional[str] = None
+    order: Optional[int] = None
+    difficulty: Optional[DifficultyLevel] = None
+    lesson_type: Optional[LessonType] = None
+    estimated_time: Optional[int] = None
+    skill_level_required: Optional[str] = None
+    learning_objectives: Optional[str] = None
+    is_premium: Optional[bool] = None
+    prerequisite_ids: Optional[List[int]] = None
+
+class LessonRead(BaseModel):
+    id: int
+    title: str
+    description: str
+    content: str
+    content_sections: List[Dict[str, Any]] = []
+    code_samples: List[Dict[str, Any]] = []
+    key_points: Optional[str] = None
+    order: int
+    difficulty: str
+    lesson_type: str
+    estimated_time: int
+    learning_objectives: str
+    is_premium: bool
+    course_id: int
+    prerequisites: List[int] = []
+
+    @field_validator('content_sections', mode='before')
+    @classmethod
+    def parse_content_sections(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return []
+        return v
+
+    @field_validator('code_samples', mode='before')
+    @classmethod
+    def parse_code_samples(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return []
+        return v
+
+    @field_validator('prerequisites', mode='before')
+    @classmethod
+    def parse_prerequisites(cls, v):
+        if v and isinstance(v, list):
+            return [prereq.id for prereq in v if hasattr(prereq, 'id')]
+        return []
+
+    @field_validator('difficulty', mode='before')
+    @classmethod
+    def parse_difficulty(cls, v):
+        return v.value if hasattr(v, 'value') else v
+
+    @field_validator('lesson_type', mode='before')
+    @classmethod
+    def parse_lesson_type(cls, v):
+        return v.value if hasattr(v, 'value') else v
+
+    model_config = {
+        "from_attributes": True
+    }
+
+class CourseBase(BaseModel):
+    title: str
+    description: str
+    order: int
+    is_premium: bool = False
+
+class CourseCreate(CourseBase):
+    pass
+
+class CourseRead(CourseBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    lessons: List[LessonRead]
+
+    class Config:
+        from_attributes = True
+
+class UserProgressBase(BaseModel):
+    lesson_id: int
+    is_completed: bool = False
+
+class UserProgressCreate(UserProgressBase):
+    pass
+
+class UserProgressRead(UserProgressBase):
+    id: int
+    user_id: int
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class UserBase(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    email: EmailStr
+
+class UserCreate(UserBase):
+    password: str = Field(min_length=8)
+
+class UserRead(UserBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = Field(default=None, min_length=3, max_length=50)
+    email: Optional[EmailStr] = None
+    is_active: Optional[bool] = None
+
+================
+File: backend/app/seed.py
+================
+# backend/app/seed.py
+from datetime import datetime
+import json
+from app.database import SessionLocal, engine
+from app.models import Base, Course, Lesson, Resource, DifficultyLevel, LessonType
+
+def seed_data():
+    db = SessionLocal()
+    try:
+        # Clear existing data
+        print("Clearing existing data...")
+        db.query(Resource).delete()
+        db.query(Lesson).delete()
+        db.query(Course).delete()
+        
+        # Create courses
+        print("Creating courses...")
+        fundamentals = Course(
+            title="Fundamentals of Apache Spark",
+            description="Master the core concepts of Apache Spark and its ecosystem",
+            order=1,
+            is_premium=False,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        
+        pyspark = Course(
+            title="PySpark Programming",
+            description="Learn to write efficient Spark applications using Python",
+            order=2,
+            is_premium=False,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        
+        advanced = Course(
+            title="Advanced Spark Programming",
+            description="Deep dive into advanced Spark concepts and optimizations",
+            order=3,
+            is_premium=True,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
+        )
+        
+        db.add_all([fundamentals, pyspark, advanced])
+        db.commit()
+        
+        # Create lessons for Fundamentals course
+        print("Creating lessons...")
+        
+        # Helper function to create content sections
+        def create_content_sections(title, description, main_content):
+            return json.dumps([
+                {
+                    "title": "Introduction",
+                    "content": description,
+                    "order": 1,
+                    "type": "text"
+                },
+                {
+                    "title": "Main Content",
+                    "content": main_content,
+                    "order": 2,
+                    "type": "text"
+                }
+            ])
+
+        # Helper function to create code samples
+        def create_code_samples(samples):
+            return json.dumps(samples)
+
+        fundamental_lessons = [
+            Lesson(
+                title="Introduction to Big Data and Apache Spark",
+                description="Understand the basics of big data and where Spark fits in",
+                summary="An overview of big data challenges and Apache Spark's role in solving them",
+                content="Apache Spark is a unified analytics engine for large-scale data processing...",
+                content_sections=create_content_sections(
+                    "Introduction to Big Data",
+                    "Understanding big data challenges and Apache Spark's role",
+                    "Detailed explanation of Apache Spark architecture and components..."
+                ),
+                code_samples=create_code_samples([
+                    {
+                        "title": "First Spark Application",
+                        "language": "python",
+                        "code": "from pyspark.sql import SparkSession\n\nspark = SparkSession.builder.getOrCreate()",
+                        "description": "Basic SparkSession initialization"
+                    }
+                ]),
+                key_points="1. Understanding big data challenges\n2. Spark's role in data processing\n3. Basic Spark architecture",
+                order=1,
+                difficulty=DifficultyLevel.BEGINNER,
+                lesson_type=LessonType.THEORY,
+                estimated_time=45,
+                skill_level_required="None",
+                learning_objectives="Understand big data challenges and Spark's role in solving them",
+                is_premium=False,
+                course_id=fundamentals.id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            ),
+            Lesson(
+                title="Spark Architecture Overview",
+                description="Learn about Spark's distributed architecture",
+                summary="Deep dive into Spark's architectural components and distributed computing model",
+                content="Explore Spark's architectural components...",
+                content_sections=create_content_sections(
+                    "Spark Architecture",
+                    "Understanding Spark's distributed computing model",
+                    "Detailed explanation of master-worker architecture..."
+                ),
+                code_samples=create_code_samples([
+                    {
+                        "title": "Examining Spark Configuration",
+                        "language": "python",
+                        "code": "spark.sparkContext.getConf().getAll()",
+                        "description": "Viewing Spark configuration"
+                    }
+                ]),
+                key_points="1. Master-worker architecture\n2. RDD fundamentals\n3. Execution model",
+                order=2,
+                difficulty=DifficultyLevel.BEGINNER,
+                lesson_type=LessonType.THEORY,
+                estimated_time=60,
+                skill_level_required="Basic Python",
+                learning_objectives="Understand Spark's distributed computing model",
+                is_premium=False,
+                course_id=fundamentals.id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+        ]
+        
+        # Create lessons for PySpark course
+        pyspark_lessons = [
+            Lesson(
+                title="Getting Started with PySpark",
+                description="Set up your PySpark development environment",
+                summary="Complete guide to setting up and configuring PySpark",
+                content="Step-by-step guide to setting up PySpark...",
+                content_sections=create_content_sections(
+                    "PySpark Setup",
+                    "Setting up your development environment",
+                    "Detailed installation and configuration steps..."
+                ),
+                code_samples=create_code_samples([
+                    {
+                        "title": "Environment Setup",
+                        "language": "bash",
+                        "code": "pip install pyspark\nexport SPARK_HOME=/path/to/spark",
+                        "description": "Basic setup commands"
+                    }
+                ]),
+                key_points="1. Installation steps\n2. Environment configuration\n3. Verification",
+                order=1,
+                difficulty=DifficultyLevel.BEGINNER,
+                lesson_type=LessonType.HANDS_ON,
+                estimated_time=90,
+                skill_level_required="Basic Python",
+                learning_objectives="Install and configure PySpark locally",
+                is_premium=False,
+                course_id=pyspark.id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            ),
+            Lesson(
+                title="Working with DataFrames",
+                description="Learn to manipulate data using PySpark DataFrames",
+                summary="Comprehensive guide to DataFrame operations in PySpark",
+                content="Master DataFrame operations in PySpark...",
+                content_sections=create_content_sections(
+                    "DataFrame Operations",
+                    "Working with PySpark DataFrames",
+                    "Detailed guide to DataFrame transformations and actions..."
+                ),
+                code_samples=create_code_samples([
+                    {
+                        "title": "Creating DataFrames",
+                        "language": "python",
+                        "code": "df = spark.createDataFrame(data)",
+                        "description": "Creating DataFrames from data"
+                    }
+                ]),
+                key_points="1. DataFrame creation\n2. Transformations\n3. Actions",
+                order=2,
+                difficulty=DifficultyLevel.INTERMEDIATE,
+                lesson_type=LessonType.HANDS_ON,
+                estimated_time=120,
+                skill_level_required="Basic Python, PySpark Setup",
+                learning_objectives="Master DataFrame operations in PySpark",
+                is_premium=False,
+                course_id=pyspark.id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+        ]
+        
+        # Create lessons for Advanced course
+        advanced_lessons = [
+            Lesson(
+                title="Spark Performance Tuning",
+                description="Learn advanced optimization techniques",
+                summary="Comprehensive guide to optimizing Spark applications",
+                content="Deep dive into Spark performance optimization...",
+                content_sections=create_content_sections(
+                    "Performance Tuning",
+                    "Advanced optimization techniques",
+                    "Detailed performance tuning strategies..."
+                ),
+                code_samples=create_code_samples([
+                    {
+                        "title": "Memory Configuration",
+                        "language": "python",
+                        "code": "spark.conf.set('spark.executor.memory', '4g')",
+                        "description": "Setting executor memory"
+                    }
+                ]),
+                key_points="1. Memory management\n2. Job optimization\n3. Resource allocation",
+                order=1,
+                difficulty=DifficultyLevel.ADVANCED,
+                lesson_type=LessonType.HANDS_ON,
+                estimated_time=150,
+                skill_level_required="Intermediate Python, Basic Spark",
+                learning_objectives="Master Spark performance optimization techniques",
+                is_premium=True,
+                course_id=advanced.id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+        ]
+        
+        all_lessons = fundamental_lessons + pyspark_lessons + advanced_lessons
+        db.add_all(all_lessons)
+        db.commit()
+        
+        # Add resources for lessons
+        print("Creating resources...")
+        resources = [
+            Resource(
+                title="Introduction Slides",
+                type="presentation",
+                content="path/to/slides.pdf",
+                description="Comprehensive slides for the introduction",
+                lesson_id=fundamental_lessons[0].id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            ),
+            Resource(
+                title="PySpark Installation Guide",
+                type="guide",
+                content="Detailed steps for installation...",
+                description="Step-by-step installation guide",
+                lesson_id=pyspark_lessons[0].id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            ),
+            Resource(
+                title="Performance Tuning Notebook",
+                type="notebook",
+                content="path/to/notebook.ipynb",
+                description="Interactive notebook for performance tuning",
+                lesson_id=advanced_lessons[0].id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
+            )
+        ]
+        
+        db.add_all(resources)
+        db.commit()
+        
+        # Set up prerequisites
+        print("Setting up prerequisites...")
+        # Fundamentals course prerequisites
+        fundamental_lessons[1].prerequisites.append(fundamental_lessons[0])
+        
+        # PySpark course prerequisites
+        pyspark_lessons[0].prerequisites.append(fundamental_lessons[1])
+        pyspark_lessons[1].prerequisites.append(pyspark_lessons[0])
+        
+        # Advanced course prerequisites
+        advanced_lessons[0].prerequisites.extend([
+            fundamental_lessons[1],
+            pyspark_lessons[1]
+        ])
+        
+        db.commit()
+        print("Sample data added successfully!")
+        
+    except Exception as e:
+        print(f"Error seeding data: {str(e)}")
+        db.rollback()
+        raise e
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    print("Creating database tables...")
+    Base.metadata.create_all(bind=engine)
+    print("Seeding data...")
+    seed_data()
+    print("Done!")
+
+================
+File: backend/app/setup_database.py
+================
+# backend/app/setup_database.py
+import os
+import sys
+from .migration import migrate_database
+from .seed import seed_data
+from .models import Base
+from .database import engine
+
+def setup_database():
+    try:
+        # Step 1: Create backup of existing database if it exists
+        if os.path.exists("./spark_tutorial.db"):
+            print("Creating backup of existing database...")
+            backup_filename = "spark_tutorial.db.backup"
+            counter = 1
+            while os.path.exists(backup_filename):
+                backup_filename = f"spark_tutorial.db.backup.{counter}"
+                counter += 1
+            os.rename("spark_tutorial.db", backup_filename)
+            print(f"Backup created as {backup_filename}")
+
+        # Step 2: Create new database tables
+        print("Creating database tables...")
+        Base.metadata.create_all(bind=engine)
+        print("Database tables created successfully!")
+
+        # Step 3: Run migrations
+        print("Running database migrations...")
+        migrate_database()
+        print("Migrations completed successfully!")
+
+        # Step 4: Seed initial data
+        print("Seeding initial data...")
+        seed_data()
+        print("Data seeding completed successfully!")
+
+        print("Database setup completed successfully!")
+        return True
+
+    except Exception as e:
+        print(f"Error during database setup: {str(e)}")
+        
+        # Attempt to restore backup if it exists
+        if 'backup_filename' in locals():
+            print(f"Attempting to restore from backup {backup_filename}...")
+            try:
+                if os.path.exists("./spark_tutorial.db"):
+                    os.remove("./spark_tutorial.db")
+                os.rename(backup_filename, "spark_tutorial.db")
+                print("Backup restored successfully!")
+            except Exception as restore_error:
+                print(f"Error restoring backup: {str(restore_error)}")
+                print(f"Backup file is still available at: {backup_filename}")
+        
+        return False
+
+if __name__ == "__main__":
+    print("Starting database setup process...")
+    success = setup_database()
+    sys.exit(0 if success else 1)
+
+================
+File: backend/content/courses/fundamentals/lessons/01_what_is_spark.md
+================
+# What is Apache Spark?
+
+---
+title: "What is Apache Spark?"
+description: "Introduction to Apache Spark and its role in big data processing"
+order: 1
+difficulty: "beginner"
+lesson_type: "theory"
+estimated_time: 25
+learning_objectives: >
+  - Explain what Apache Spark is and its role in big data processing
+  - Understand the key differences between Spark and traditional data processing
+  - Identify the main components of the Spark ecosystem
+  - Describe real-world use cases for Apache Spark
+is_premium: false
+course_id: 1
+---
+
+[Previous lesson content goes here, exactly as shown in the lesson artifact above]
+
+================
+File: backend/content/courses/fundamentals/video_scripts/01_what_is_spark.md
+================
+# What is Apache Spark? - Video Script
+
+## Video Details
+- Duration: 5-7 minutes
+- Style: Animation with code demonstrations
+- Voice: AI-generated (Eleven Labs)
+
+## Script
+
+### Opening Sequence
+[Opening Animation: Modern tech graphics with data flow visualization]
+
+**Voice-over**: "Welcome to the world of Apache Spark..."
+
+[Rest of the video script content goes here, as shown in the lesson artifact above]
+
+## Production Notes
+
+### Visual Elements Needed
+1. Opening animation
+   - Modern tech graphics
+   - Data flow visualization
+   - Logo reveal
+
+2. Infographics
+   - Traditional vs. Spark Processing comparison
+   - Spark Ecosystem diagram
+   - Component icons
+
+3. Code Demonstration Setup
+   - Clean IDE theme
+   - Large, readable font
+   - Key sections highlighted
+
+### Timing Breakdown
+- Intro: 30 seconds
+- Core Concepts: 2 minutes
+- Code Demo: 2 minutes
+- Real-world Examples: 1 minute
+- Closing: 30 seconds
+
+### Technical Requirements
+- Resolution: 1920x1080
+- Frame Rate: 30fps
+- Audio: 48kHz, stereo
+
+================
+File: backend/database_backup.json
+================
+{
+  "courses": [],
+  "lessons": [],
+  "resources": []
+}
+
+================
+File: frontend/app/auth/callback/page.tsx
+================
+// frontend/app/auth/callback/page.tsx
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { useAuth } from '@/contexts/AuthContext';
+import { AlertCircle } from 'lucide-react';
+
+export default function AuthCallback() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { login } = useAuth();
+  const [error, setError] = useState<string | null>(null);
+  const [debugInfo, setDebugInfo] = useState<string>('');
+
+  useEffect(() => {
+    async function handleCallback() {
+      try {
+        setDebugInfo('Starting authentication process...');
+        
+        const code = searchParams.get('code');
+        const error = searchParams.get('error');
+
+        if (error) {
+          throw new Error(
+            error === 'access_denied' 
+              ? 'Login was cancelled' 
+              : `Authentication error: ${error}`
+          );
+        }
+
+        if (!code) {
+          throw new Error('No authorization code received');
+        }
+
+        setDebugInfo('Got authorization code. Attempting to exchange for token...');
+
+        // Test backend connectivity
+        try {
+          const healthCheck = await fetch('http://localhost:8000/');
+          if (!healthCheck.ok) {
+            throw new Error('Backend server is not responding');
+          }
+        } catch (e) {
+          throw new Error('Cannot connect to backend server. Please ensure it is running.');
+        }
+
+        // Exchange code for token
+        const response = await fetch('http://localhost:8000/auth/google/token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: JSON.stringify({
+            code,
+            redirect_uri: `${window.location.origin}/auth/callback`
+          }),
+        });
+
+        setDebugInfo('Received response from token endpoint...');
+
+        if (!response.ok) {
+          const errorData = await response.text();
+          console.error('Token exchange failed:', errorData);
+          throw new Error(`Failed to exchange token: ${errorData}`);
+        }
+
+        const data = await response.json();
+        await login(data.access_token);
+
+        setDebugInfo('Successfully logged in. Redirecting...');
+
+        // Redirect to saved URL or home
+        const redirectUrl = sessionStorage.getItem('redirectUrl') || '/';
+        sessionStorage.removeItem('redirectUrl');
+        router.push(redirectUrl);
+      } catch (error) {
+        console.error('Authentication error:', error);
+        setError(
+          error instanceof Error 
+            ? error.message 
+            : 'An unexpected error occurred'
+        );
+        setDebugInfo(`Error occurred: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    }
+
+    handleCallback();
+  }, [searchParams, login, router]);
+
+  if (error) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+        <div className="max-w-md w-full bg-white rounded-lg shadow-lg p-6">
+          <div className="flex items-center gap-2 text-red-600 mb-4">
+            <AlertCircle className="h-5 w-5" />
+            <h2 className="text-lg font-semibold">Authentication Error</h2>
+          </div>
+          <p className="text-gray-600 mb-4">{error}</p>
+          {debugInfo && (
+            <div className="bg-gray-50 p-4 rounded-md mb-4">
+              <p className="text-sm text-gray-500 font-mono">{debugInfo}</p>
+            </div>
+          )}
+          <div className="flex gap-4">
+            <button
+              onClick={() => router.push('/login')}
+              className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              Return to Login
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              className="flex-1 bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors"
+            >
+              Try Again
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+        <p className="text-gray-600">Completing sign in...</p>
+        {debugInfo && (
+          <p className="text-sm text-gray-500 mt-2">{debugInfo}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+================
+File: frontend/app/components/ui/card.tsx
+================
+// frontend/app/components/ui/card.tsx
+import * as React from "react"
+
+const Card = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={`rounded-lg border bg-card text-card-foreground shadow-sm ${className}`}
+    {...props}
+  />
+))
+Card.displayName = "Card"
+
+const CardHeader = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={`flex flex-col space-y-1.5 p-6 ${className}`}
+    {...props}
+  />
+))
+CardHeader.displayName = "CardHeader"
+
+const CardTitle = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLHeadingElement>
+>(({ className, ...props }, ref) => (
+  <h3
+    ref={ref}
+    className={`text-2xl font-semibold leading-none tracking-tight ${className}`}
+    {...props}
+  />
+))
+CardTitle.displayName = "CardTitle"
+
+const CardDescription = React.forwardRef<
+  HTMLParagraphElement,
+  React.HTMLAttributes<HTMLParagraphElement>
+>(({ className, ...props }, ref) => (
+  <p
+    ref={ref}
+    className={`text-sm text-muted-foreground ${className}`}
+    {...props}
+  />
+))
+CardDescription.displayName = "CardDescription"
+
+const CardContent = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div ref={ref} className={`p-6 pt-0 ${className}`} {...props} />
+))
+CardContent.displayName = "CardContent"
+
+const CardFooter = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(({ className, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={`flex items-center p-6 pt-0 ${className}`}
+    {...props}
+  />
+))
+CardFooter.displayName = "CardFooter"
+
+export {
+  Card,
+  CardHeader,
+  CardFooter,
+  CardTitle,
+  CardDescription,
+  CardContent,
+}
+
+================
+File: frontend/app/components/CopyButton.tsx
+================
+import React, { useState } from 'react';
+import { Copy, Check } from 'lucide-react';
+
+interface CopyButtonProps {
+  code: string;
+}
+
+const CopyButton: React.FC<CopyButtonProps> = ({ code }) => {
+  const [copied, setCopied] = useState(false);
+
+  const copyToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000); // Reset after 2 seconds
+    } catch (err) {
+      console.error('Failed to copy code:', err);
+    }
+  };
+
+  return (
+    <button
+      onClick={copyToClipboard}
+      className="absolute top-3 right-3 p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white transition-colors"
+      title={copied ? "Copied!" : "Copy code"}
+    >
+      {copied ? (
+        <Check size={16} className="text-green-400" />
+      ) : (
+        <Copy size={16} />
+      )}
+    </button>
+  );
+};
+
+export default CopyButton;
+
+================
+File: frontend/app/components/CourseCard.tsx
+================
+// frontend/app/components/CourseCard.tsx
+import React from 'react';
+import Link from 'next/link';
+import { Course, CourseCategory, ContentFormat } from '@/types';
+
+interface CourseCardProps {
+  course: Course;
+}
+
+export const CourseCard: React.FC<CourseCardProps> = ({ course }) => {
+  const getCategoryIcon = (category: CourseCategory) => {
+    switch (category) {
+      case CourseCategory.SPARK:
+        return '⚡';
+      case CourseCategory.API:
+        return '🔌';
+      case CourseCategory.PYTHON:
+        return '🐍';
+      case CourseCategory.DATA_SCIENCE:
+        return '📊';
+      case CourseCategory.WEB_DEVELOPMENT:
+        return '🌐';
+      default:
+        return '📚';
+    }
+  };
+
+  const getFormatLabel = (format: ContentFormat): string => {
+    // Split by underscore and capitalize each word
+    const words = format.toString().split('_');
+    return words.map((word: string) => 
+      word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+    ).join(' ');
+  };
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow duration-300">
+      <div className="p-4 border-b border-gray-100">
+        <div className="flex justify-between items-start">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl" role="img" aria-label={course.category}>
+              {getCategoryIcon(course.category)}
+            </span>
+            <h2 className="text-xl font-semibold text-gray-800">{course.title}</h2>
+          </div>
+          {course.is_premium && (
+            <span className="px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r from-yellow-200 to-yellow-100 text-yellow-700">
+              Premium
+            </span>
+          )}
+        </div>
+      </div>
+      
+      <div className="p-4">
+        <p className="text-gray-600 mb-4">{course.description}</p>
+        
+        {/* Tags */}
+        {course.tags && course.tags.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-4">
+            {course.tags.map((tagItem: string) => (
+              <span key={tagItem} className="px-2 py-1 bg-gray-100 rounded-full text-sm text-gray-600">
+                {tagItem}
+              </span>
+            ))}
+          </div>
+        )}
+        
+        {/* Prerequisites */}
+        {course.prerequisites && course.prerequisites.length > 0 && (
+          <div className="mb-4">
+            <h3 className="text-sm font-medium text-gray-700 mb-2">Prerequisites:</h3>
+            <ul className="list-disc list-inside text-sm text-gray-600">
+              {course.prerequisites.map((prerequisite: string) => (
+                <li key={prerequisite}>{prerequisite}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        
+        {/* Content Formats */}
+        {course.supported_content_formats && course.supported_content_formats.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {course.supported_content_formats.map((formatItem: ContentFormat) => (
+              <span key={formatItem} className="px-2 py-1 bg-blue-100 rounded-full text-sm text-blue-600">
+                {getFormatLabel(formatItem)}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      
+      <div className="px-4 py-3 bg-gray-50 flex justify-between items-center">
+        <span className="text-sm text-gray-500">
+          Course {course.order}
+        </span>
+        <Link 
+          href={`/courses/${course.id}`}
+          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+        >
+          View Course
+        </Link>
+      </div>
+    </div>
+  );
+};
+
+export default CourseCard;
+
+================
+File: frontend/app/components/CourseProgressDashboard.tsx
+================
+// frontend/app/components/CourseProgressDashboard.tsx
+import React, { useState, useEffect } from 'react';
+import { Area, AreaChart, Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import { Clock, Target, Trophy } from 'lucide-react';
+
+interface WeeklyActivity {
+  week: string;
+  completed: number;
+  minutes: number;
+}
+
+interface CourseProgressData {
+  completionRate: number;
+  totalLessons: number;
+  completedLessons: number;
+  weeklyActivity: WeeklyActivity[];
+}
+
+const CourseDashboard: React.FC = () => {
+  const [courseProgress, setCourseProgress] = useState<CourseProgressData>({
+    completionRate: 0,
+    totalLessons: 0,
+    completedLessons: 0,
+    weeklyActivity: []
+  });
+
+  useEffect(() => {
+    // Mock data for demonstration
+    const mockProgress: CourseProgressData = {
+      completionRate: 65,
+      totalLessons: 24,
+      completedLessons: 16,
+      weeklyActivity: [
+        { week: 'Week 1', completed: 4, minutes: 120 },
+        { week: 'Week 2', completed: 3, minutes: 90 },
+        { week: 'Week 3', completed: 5, minutes: 150 },
+        { week: 'Week 4', completed: 4, minutes: 110 }
+      ]
+    };
+    setCourseProgress(mockProgress);
+  }, []);
+
+  const progressColor = (percentage: number): string => {
+    if (percentage >= 80) return 'text-green-600';
+    if (percentage >= 50) return 'text-blue-600';
+    return 'text-yellow-600';
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Summary Cards */}
+      <div className="grid gap-4 md:grid-cols-3">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium">Completion Rate</CardTitle>
+            <Trophy className="h-4 w-4 text-blue-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              <span className={progressColor(courseProgress.completionRate)}>
+                {courseProgress.completionRate}%
+              </span>
+            </div>
+            <p className="text-xs text-gray-500">
+              Overall course progress
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium">Lessons Completed</CardTitle>
+            <Target className="h-4 w-4 text-green-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {courseProgress.completedLessons}/{courseProgress.totalLessons}
+            </div>
+            <p className="text-xs text-gray-500">
+              Total lessons completed
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-sm font-medium">Study Time</CardTitle>
+            <Clock className="h-4 w-4 text-purple-600" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {courseProgress.weeklyActivity.reduce((acc, week) => acc + week.minutes, 0)} mins
+            </div>
+            <p className="text-xs text-gray-500">
+              Total study time
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Weekly Activity Chart */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Weekly Activity</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={courseProgress.weeklyActivity}>
+                <defs>
+                  <linearGradient id="colorMinutes" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.8}/>
+                    <stop offset="95%" stopColor="#3B82F6" stopOpacity={0.1}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="week" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Area 
+                  type="monotone" 
+                  dataKey="minutes" 
+                  stroke="#3B82F6" 
+                  fillOpacity={1} 
+                  fill="url(#colorMinutes)" 
+                  name="Study Minutes"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Lessons Completion Chart */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Lessons Completed</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={courseProgress.weeklyActivity}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="week" />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Bar 
+                  dataKey="completed" 
+                  fill="#10B981" 
+                  name="Lessons Completed"
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+export default CourseDashboard;
+
+================
+File: frontend/app/components/GoogleLoginButton.tsx
+================
+// frontend/app/components/GoogleLoginButton.tsx
+'use client';
+
+import React, { useState } from 'react';
+import { AlertCircle } from 'lucide-react';
+
+const GoogleLoginButton = () => {
+  const [error, setError] = useState<string | null>(null);
+
+  const handleGoogleLogin = () => {
+    try {
+      const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+      if (!clientId) {
+        throw new Error('Google client ID is not configured');
+      }
+
+      // Google OAuth configuration
+      const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+      const REDIRECT_URI = `${window.location.origin}/auth/callback`;
+      
+      // Required OAuth parameters
+      const params = new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: REDIRECT_URI,
+        response_type: "code",
+        scope: "openid email profile",
+        access_type: "offline",
+        prompt: "consent",
+      });
+
+      // Redirect to Google's OAuth page
+      window.location.href = `${GOOGLE_AUTH_URL}?${params.toString()}`;
+    } catch (error) {
+      console.error('Error initiating Google login:', error);
+      setError(
+        error instanceof Error 
+          ? error.message 
+          : 'Failed to initiate Google login'
+      );
+    }
+  };
+
+  if (error) {
+    return (
+      <div className="text-center p-4 bg-red-50 rounded-lg">
+        <div className="flex items-center justify-center gap-2 text-red-600 mb-2">
+          <AlertCircle size={20} />
+          <p className="font-medium">Configuration Error</p>
+        </div>
+        <p className="text-sm text-red-600">{error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={handleGoogleLogin}
+      className="flex items-center justify-center gap-2 w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm bg-white hover:bg-gray-50 transition-colors"
+    >
+      {/* Google Icon */}
+      <svg 
+        viewBox="0 0 24 24" 
+        width="24" 
+        height="24" 
+        className="w-6 h-6"
+      >
+        <path
+          fill="#4285F4"
+          d="M23.745 12.27c0-.79-.07-1.54-.19-2.27h-11.3v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"
+        />
+        <path
+          fill="#34A853"
+          d="M12.255 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96h-3.98v3.09C3.515 21.3 7.565 24 12.255 24z"
+        />
+        <path
+          fill="#FBBC05"
+          d="M5.525 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62h-3.98a11.86 11.86 0 000 10.76l3.98-3.09z"
+        />
+        <path
+          fill="#EA4335"
+          d="M12.255 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C18.205 1.19 15.495 0 12.255 0c-4.69 0-8.74 2.7-10.71 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"
+        />
+      </svg>
+      
+      <span className="text-gray-700 font-medium">
+        Continue with Google
+      </span>
+    </button>
+  );
+};
+
+export default GoogleLoginButton;
+
+================
+File: frontend/app/components/LessonContentDisplay.tsx
+================
+import React, { useEffect } from 'react';
+import { Code } from 'lucide-react';
+import Prism from 'prismjs';
+import CopyButton from './CopyButton';
+import 'prismjs/themes/prism-tomorrow.css';
+import 'prismjs/components/prism-python';
+import 'prismjs/components/prism-bash';
+import 'prismjs/components/prism-javascript';
+import 'prismjs/components/prism-java';
+import 'prismjs/components/prism-scala';
+
+interface ContentSectionData {
+  title: string;
+  content: string;
+  type: 'text' | 'code' | 'exercise';
+  order: number;
+}
+
+interface CodeSample {
+  title: string;
+  language: string;
+  code: string;
+  description?: string;
+}
+
+interface Lesson {
+  id: number;
+  title: string;
+  content: string;
+  content_sections?: string; // JSON string
+  code_samples?: string; // JSON string
+  key_points?: string;
+  learning_objectives: string;
+}
+
+interface ContentSectionProps {
+  section: ContentSectionData;
+}
+
+interface CodeBlockProps {
+  code: string;
+  language?: string;
+  title?: string;
+}
+
+const CodeBlock: React.FC<CodeBlockProps> = ({ 
+  code, 
+  language = 'python',
+  title 
+}) => {
+  return (
+    <div className="relative">
+      {title && (
+        <div className="flex items-center gap-2 mb-2 text-gray-700">
+          <Code size={20} />
+          <span className="font-medium">{title}</span>
+        </div>
+      )}
+      <pre className="!bg-gray-900 !p-4 rounded-lg overflow-x-auto">
+        <CopyButton code={code} />
+        <code className={`language-${language}`}>{code}</code>
+      </pre>
+    </div>
+  );
+};
+
+const ContentSection: React.FC<ContentSectionProps> = ({ section }) => {
+  useEffect(() => {
+    Prism.highlightAll();
+  }, [section]);
+
+  const getContent = () => {
+    switch (section.type) {
+      case 'code':
+        return (
+          <div className="bg-gray-50 rounded-lg p-4 my-4">
+            <CodeBlock 
+              code={section.content}
+              title={section.title}
+            />
+          </div>
+        );
+      
+      case 'exercise':
+        return (
+          <div className="border-l-4 border-blue-500 bg-blue-50 p-4 my-4 rounded-r-lg">
+            <h3 className="font-semibold text-blue-900 mb-2">{section.title}</h3>
+            <div className="prose text-blue-800">
+              {section.content}
+            </div>
+          </div>
+        );
+      
+      default:
+        return (
+          <div className="my-4">
+            <h3 className="text-xl font-semibold text-gray-900 mb-2">{section.title}</h3>
+            <div className="prose text-gray-700">
+              {section.content.split('\n').map((paragraph: string, index: number) => (
+                <p key={index} className="mb-4">{paragraph}</p>
+              ))}
+            </div>
+          </div>
+        );
+    }
+  };
+
+  return getContent();
+};
+
+interface LessonContentDisplayProps {
+  lesson: Lesson | null;
+}
+
+const LessonContentDisplay: React.FC<LessonContentDisplayProps> = ({ lesson }) => {
+  useEffect(() => {
+    Prism.highlightAll();
+  }, [lesson]);
+
+  // Early return if lesson is null
+  if (!lesson) {
+    return null;
+  }
+
+  if (!lesson.content_sections) {
+    return (
+      <div className="prose max-w-none">
+        {lesson.content.split('\n').map((paragraph: string, index: number) => (
+          <p key={index} className="mb-4">{paragraph}</p>
+        ))}
+      </div>
+    );
+  }
+
+  const sections: ContentSectionData[] = JSON.parse(lesson.content_sections);
+
+  return (
+    <div className="max-w-4xl mx-auto">
+      {/* Key Points Section */}
+      {lesson.key_points && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-8">
+          <h2 className="text-xl font-semibold text-yellow-900 mb-4">Key Points</h2>
+          <ul className="list-disc list-inside space-y-2 text-yellow-900">
+            {lesson.key_points.split('\n').map((point: string, index: number) => (
+              <li key={index} className="ml-4">{point.replace(/^\d+\.\s*/, '')}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Learning Objectives */}
+      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-8">
+        <h2 className="text-xl font-semibold text-blue-900 mb-4">Learning Objectives</h2>
+        <div className="prose text-blue-800">
+          {lesson.learning_objectives.split('\n').map((objective: string, index: number) => (
+            <p key={index} className="mb-2">{objective}</p>
+          ))}
+        </div>
+      </div>
+
+      {/* Main Content Sections */}
+      {sections.map((section, index) => (
+        <ContentSection key={index} section={section} />
+      ))}
+
+      {/* Code Samples */}
+      {lesson.code_samples && (
+        <div className="mt-8">
+          <h2 className="text-2xl font-bold text-gray-900 mb-4">Code Examples</h2>
+          {JSON.parse(lesson.code_samples).map((sample: CodeSample, index: number) => (
+            <div key={index} className="bg-gray-50 rounded-lg p-4 mb-4">
+              {sample.description && (
+                <p className="text-gray-600 mb-2">{sample.description}</p>
+              )}
+              <CodeBlock 
+                code={sample.code}
+                language={sample.language}
+                title={sample.title}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default LessonContentDisplay;
+
+================
+File: frontend/app/components/NavHeader.tsx
+================
+// frontend/app/components/NavHeader.tsx
+'use client';
+
+import { useState } from 'react';
+import Link from 'next/link';
+import { useAuth } from '@/contexts/AuthContext';
+import { User, LogOut, Menu } from 'lucide-react';
+
+const NavHeader = () => {
+  const { user, logout } = useAuth();
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  const handleLogout = () => {
+    logout();
+    setIsMenuOpen(false);
+  };
+
+  return (
+    <header className="bg-white border-b border-gray-200">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-between items-center h-16">
+          {/* Logo/Home Link */}
+          <Link href="/" className="text-xl font-bold text-gray-900">
+            Spark Tutorial
+          </Link>
+
+          {/* Navigation Links */}
+          <nav className="hidden md:flex space-x-8">
+            <Link href="/courses" className="text-gray-600 hover:text-gray-900">
+              Courses
+            </Link>
+            <Link href="/lessons" className="text-gray-600 hover:text-gray-900">
+              Lessons
+            </Link>
+          </nav>
+
+          {/* User Menu */}
+          <div className="relative">
+            {user ? (
+              <>
+                <button
+                  onClick={() => setIsMenuOpen(!isMenuOpen)}
+                  className="flex items-center space-x-2 text-gray-600 hover:text-gray-900"
+                >
+                  {user.picture ? (
+                    <img 
+                      src={user.picture} 
+                      alt={user.name || 'User'} 
+                      className="w-8 h-8 rounded-full"
+                    />
+                  ) : (
+                    <User className="w-8 h-8 p-1 rounded-full border-2 border-gray-300" />
+                  )}
+                  <span className="hidden md:inline">{user.name || user.email}</span>
+                </button>
+
+                {/* Dropdown Menu */}
+                {isMenuOpen && (
+                  <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg py-1 border border-gray-200">
+                    <button
+                      onClick={handleLogout}
+                      className="flex items-center w-full px-4 py-2 text-gray-700 hover:bg-gray-100"
+                    >
+                      <LogOut className="w-4 h-4 mr-2" />
+                      Sign Out
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <Link 
+                href="/login"
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+              >
+                Sign In
+              </Link>
+            )}
+          </div>
+
+          {/* Mobile Menu Button */}
+          <button
+            className="md:hidden p-2 rounded-md text-gray-600 hover:text-gray-900"
+            onClick={() => setIsMenuOpen(!isMenuOpen)}
+          >
+            <Menu className="h-6 w-6" />
+          </button>
+        </div>
+
+        {/* Mobile Navigation */}
+        {isMenuOpen && (
+          <div className="md:hidden py-2 space-y-1">
+            <Link 
+              href="/courses" 
+              className="block px-3 py-2 text-gray-600 hover:text-gray-900"
+            >
+              Courses
+            </Link>
+            <Link 
+              href="/lessons" 
+              className="block px-3 py-2 text-gray-600 hover:text-gray-900"
+            >
+              Lessons
+            </Link>
+          </div>
+        )}
+      </div>
+    </header>
+  );
+};
+
+export default NavHeader;
+
+================
+File: frontend/app/components/ProtectedRoute.tsx
+================
+// frontend/app/components/ProtectedRoute.tsx
+'use client';
+
+import { useAuth } from '../contexts/AuthContext';
+import { useRouter, usePathname } from 'next/navigation';
+import { useEffect } from 'react';
+
+interface ProtectedRouteProps {
+  children: React.ReactNode;
+}
+
+const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
+  const { user, isLoading, getToken } = useAuth();
+  const router = useRouter();
+  const pathname = usePathname();
+
+  useEffect(() => {
+    // Don't redirect while loading
+    if (isLoading) return;
+
+    // If no user and not loading, redirect to login
+    if (!user && !getToken()) {
+      // Save the attempted URL to redirect back after login
+      sessionStorage.setItem('redirectUrl', pathname);
+      router.push('/login');
+    }
+  }, [user, isLoading, router, pathname, getToken]);
+
+  // Show loading state
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <p className="ml-2">Loading...</p>
+      </div>
+    );
+  }
+
+  // If not logged in, don't render anything
+  if (!user) {
+    return null;
+  }
+
+  // If logged in, render the protected content
+  return <>{children}</>;
+};
+
+export default ProtectedRoute;
+
+================
+File: frontend/app/contexts/AuthContext.tsx
+================
+// frontend/app/contexts/AuthContext.tsx
+'use client';
+
+import React, { createContext, useContext, useEffect, useState } from 'react';
+
+interface User {
+  id: number;
+  email: string;
+  name: string | null;
+  picture: string | null;
+}
+
+interface AuthContextType {
+  user: User | null;
+  isLoading: boolean;
+  login: (token: string) => Promise<void>;
+  logout: () => void;
+  getToken: () => string | null; // Explicitly type the return
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    // Check for token on initial load
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+      validateAndLoadUser(token);
+    } else {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const validateAndLoadUser = async (token: string) => {
+    try {
+      // Call backend to validate token and get user info
+      const response = await fetch('http://localhost:8000/auth/validate', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (response.ok) {
+        const userData = await response.json();
+        setUser(userData);
+        localStorage.setItem('auth_token', token);
+      } else {
+        // Token is invalid
+        localStorage.removeItem('auth_token');
+        setUser(null);
+      }
+    } catch (error) {
+      console.error('Error validating token:', error);
+      localStorage.removeItem('auth_token');
+      setUser(null);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const login = async (token: string) => {
+    await validateAndLoadUser(token);
+  };
+
+  const logout = () => {
+    localStorage.removeItem('auth_token');
+    setUser(null);
+  };
+
+  const getToken = () => {
+    return localStorage.getItem('auth_token');
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, isLoading, login, logout, getToken }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+}
+
+================
+File: frontend/app/courses/[id]/page.tsx
+================
+// frontend/app/courses/[id]/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import type { Course, Lesson } from '../../types';
+
+function DifficultyBadge({ difficulty }: { difficulty: Lesson['difficulty'] }) {
+  const colors = {
+    beginner: 'bg-green-100 text-green-800',
+    intermediate: 'bg-yellow-100 text-yellow-800',
+    advanced: 'bg-red-100 text-red-800'
+  };
+
+  return (
+    <span className={`px-2 py-1 rounded text-sm font-medium ${colors[difficulty]}`}>
+      {difficulty.charAt(0).toUpperCase() + difficulty.slice(1)}
+    </span>
+  );
+}
+
+function LessonCard({ lesson }: { lesson: Lesson }) {
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow duration-300">
+      <div className="p-4 border-b border-gray-100">
+        <div className="flex justify-between items-start">
+          <h3 className="text-xl font-semibold text-gray-800">{lesson.title}</h3>
+          <div className="flex gap-2">
+            <DifficultyBadge difficulty={lesson.difficulty} />
+            {lesson.is_premium && (
+              <span className="px-2 py-1 rounded text-sm font-medium bg-gradient-to-r from-yellow-200 to-yellow-100 text-yellow-700">
+                Premium
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+      
+      <div className="p-4">
+        <p className="text-gray-600 mb-4">{lesson.description}</p>
+        <div className="flex gap-4 text-sm text-gray-500">
+          <span>Type: {lesson.lesson_type.replace('_', ' ')}</span>
+          <span>•</span>
+          <span>{lesson.estimated_time} minutes</span>
+        </div>
+      </div>
+      
+      <div className="px-4 py-3 bg-gray-50 flex justify-between items-center">
+        <div className="text-sm text-gray-500">
+          Lesson {lesson.order}
+        </div>
+        <Link 
+          href={`/lessons/${lesson.id}`}
+          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+        >
+          Start Lesson
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+export default function CoursePage() {
+  const params = useParams();
+  const courseId = typeof params?.id === 'string' ? params.id : Array.isArray(params?.id) ? params.id[0] : null;
+  
+  const [course, setCourse] = useState<Course | null>(null);
+  const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function fetchCourseAndLessons() {
+      if (!courseId) {
+        setError('Invalid course ID');
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        setError(null);
+        console.log('Attempting to fetch course data...');
+
+        // Fetch course data
+        console.log(`Fetching course: http://localhost:8000/courses/${courseId}`);
+        const courseResponse = await fetch(`http://localhost:8000/courses/${courseId}`, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!courseResponse.ok) {
+          throw new Error(`Course fetch failed with status: ${courseResponse.status}`);
+        }
+
+        const courseData = await courseResponse.json();
+        console.log('Course data received:', courseData);
+
+        // Fetch lessons data
+        console.log(`Fetching lessons: http://localhost:8000/courses/${courseId}/lessons`);
+        const lessonsResponse = await fetch(`http://localhost:8000/courses/${courseId}/lessons`, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!lessonsResponse.ok) {
+          throw new Error(`Lessons fetch failed with status: ${lessonsResponse.status}`);
+        }
+
+        const lessonsData = await lessonsResponse.json();
+        console.log('Lessons data received:', lessonsData);
+
+        setCourse(courseData);
+        setLessons(lessonsData.lessons || []);
+      } catch (error) {
+        console.error('Error details:', error);
+        setError(
+          error instanceof Error 
+            ? `Failed to load course: ${error.message}` 
+            : 'Failed to load course. Please ensure the backend server is running.'
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    fetchCourseAndLessons();
+  }, [courseId]);
+
+  if (isLoading) {
+    return (
+      <div className="p-8">
+        <div className="flex items-center justify-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          <p className="ml-2">Loading course...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !course) {
+    return (
+      <div className="p-8">
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative">
+          <p className="font-medium">Error</p>
+          <p>{error || 'Course not found'}</p>
+          <div className="mt-2">
+            <p className="text-sm font-medium">Troubleshooting steps:</p>
+            <ul className="list-disc ml-5 mt-1 text-sm">
+              <li>Ensure the backend server is running on port 8000</li>
+              <li>Check that the course ID is valid</li>
+              <li>Try refreshing the page</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <main className="max-w-7xl mx-auto p-8">
+      <div className="mb-8">
+        <div className="flex justify-between items-start mb-4">
+          <h1 className="text-3xl font-bold text-gray-900">{course.title}</h1>
+          {course.is_premium && (
+            <span className="px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r from-yellow-200 to-yellow-100 text-yellow-700">
+              Premium Course
+            </span>
+          )}
+        </div>
+        <p className="text-xl text-gray-600">{course.description}</p>
+      </div>
+      
+      {lessons.length === 0 ? (
+        <div className="text-center py-8">
+          <p className="text-gray-600">No lessons available for this course yet.</p>
+        </div>
+      ) : (
+        <div className="grid gap-6 md:grid-cols-2">
+          {lessons.map((lesson) => (
+            <LessonCard key={lesson.id} lesson={lesson} />
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
+
+================
+File: frontend/app/lessons/[id]/page.tsx
+================
+// frontend/app/lessons/[id]/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import LessonContentDisplay from '@/components/LessonContentDisplay';
+import ProtectedRoute from '@/components/ProtectedRoute';
+import { useAuth } from '@/contexts/AuthContext';
+import { 
+  Lesson, 
+  NavigationInfo, 
+  Resource, 
+  UserProgress,
+  DifficultyLevel,
+  User
+} from '@/types';
+
+interface DifficultyBadgeProps {
+  difficulty: DifficultyLevel;
+}
+
+const DifficultyBadge: React.FC<DifficultyBadgeProps> = ({ difficulty }) => {
+  const colors = {
+    [DifficultyLevel.BEGINNER]: 'bg-green-100 text-green-800',
+    [DifficultyLevel.INTERMEDIATE]: 'bg-yellow-100 text-yellow-800',
+    [DifficultyLevel.ADVANCED]: 'bg-red-100 text-red-800'
+  };
+
+  return (
+    <span className={`px-2 py-1 rounded text-sm font-medium ${colors[difficulty]}`}>
+      {difficulty.charAt(0).toUpperCase() + difficulty.slice(1)}
+    </span>
+  );
+};
+
+interface LessonHeaderProps {
+  lesson: Lesson;
+  progress?: UserProgress | null;
+}
+
+const LessonHeader: React.FC<LessonHeaderProps> = ({ lesson, progress }) => {
+  return (
+    <div className="mb-8">
+      <div className="flex justify-between items-start mb-4">
+        <h1 className="text-3xl font-bold text-gray-900">{lesson.title}</h1>
+        <div className="flex gap-2">
+          <DifficultyBadge difficulty={lesson.difficulty} />
+          {lesson.is_premium && (
+            <span className="px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r from-yellow-200 to-yellow-100 text-yellow-700">
+              Premium
+            </span>
+          )}
+        </div>
+      </div>
+      <p className="text-xl text-gray-600">{lesson.description}</p>
+      <div className="mt-4 flex gap-4 text-sm text-gray-500">
+        <span>Estimated time: {lesson.estimated_time} minutes</span>
+        <span>•</span>
+        <span>Type: {lesson.lesson_type.replace('_', ' ')}</span>
+        {progress && (
+          <span>
+            {progress.is_completed 
+              ? '✓ Completed' 
+              : progress.completed_at 
+                ? `Completed on ${new Date(progress.completed_at).toLocaleDateString()}` 
+                : 'Not Started'}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+interface LessonNavigationProps {
+  navigation: NavigationInfo;
+}
+
+const LessonNavigation: React.FC<LessonNavigationProps> = ({ navigation }) => {
+  return (
+    <div className="flex justify-between items-center py-6 border-t border-gray-200 mt-8">
+      {navigation.previous ? (
+        <Link
+          href={`/lessons/${navigation.previous.id}`}
+          className="flex items-center text-blue-600 hover:text-blue-800"
+        >
+          <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+          <span>Previous: {navigation.previous.title}</span>
+        </Link>
+      ) : (
+        <div></div>
+      )}
+      
+      {navigation.next && (
+        <Link
+          href={`/lessons/${navigation.next.id}`}
+          className="flex items-center text-blue-600 hover:text-blue-800"
+        >
+          <span>Next: {navigation.next.title}</span>
+          <svg className="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+        </Link>
+      )}
+    </div>
+  );
+};
+
+interface ResourceCardProps {
+  resource: Resource;
+}
+
+const ResourceCard: React.FC<ResourceCardProps> = ({ resource }) => {
+  const icons: { [key: string]: string } = {
+    notebook: '📓',
+    code_sample: '💻',
+    dataset: '📊',
+    guide: '📖',
+    presentation: '🎯'
+  };
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow">
+      <div className="flex items-start">
+        <span className="text-2xl mr-3">{icons[resource.type] || '📄'}</span>
+        <div>
+          <h3 className="font-medium text-gray-900">{resource.title}</h3>
+          <p className="text-sm text-gray-500 mt-1">Type: {resource.type}</p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface ResourceSectionProps {
+  lessonId: string | null;
+}
+
+const ResourceSection: React.FC<ResourceSectionProps> = ({ lessonId }) => {
+  const [resources, setResources] = useState<Resource[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const { getToken } = useAuth();
+
+  useEffect(() => {
+    async function fetchResources() {
+      if (!lessonId) return;
+      
+      try {
+        const token = getToken();
+        const response = await fetch(`http://localhost:8000/lessons/${lessonId}/resources`, {
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            ...(token && { 'Authorization': `Bearer ${token}` })
+          },
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Failed to fetch resources: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        setResources(data.resources);
+      } catch (error) {
+        console.error('Error fetching resources:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    fetchResources();
+  }, [lessonId, getToken]);
+
+  if (!lessonId || isLoading) return null;
+  if (resources.length === 0) return null;
+
+  return (
+    <div className="mt-12">
+      <h2 className="text-2xl font-bold text-gray-900 mb-4">Additional Resources</h2>
+      <div className="grid gap-4 md:grid-cols-2">
+        {resources.map((resource) => (
+          <ResourceCard key={resource.id} resource={resource} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default function LessonPage() {
+  const { user, getToken } = useAuth();
+  const params = useParams();
+  const lessonId = typeof params?.id === 'string' ? params.id : Array.isArray(params?.id) ? params.id[0] : null;
+  
+  const [lesson, setLesson] = useState<Lesson | null>(null);
+  const [navigation, setNavigation] = useState<NavigationInfo | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<UserProgress | null>(null);
+
+  // Update lesson progress function
+  const updateLessonProgress = async (isCompleted: boolean = true) => {
+    try {
+      const token = getToken();
+      if (!token) {
+        throw new Error('No authentication token found');
+      }
+
+      if (!lessonId) {
+        throw new Error('No lesson ID available');
+      }
+
+      const response = await fetch(`http://localhost:8000/lessons/${lessonId}/progress`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ is_completed: isCompleted })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update lesson progress');
+      }
+
+      const progressData = await response.json();
+      setProgress(progressData);
+    } catch (error) {
+      console.error('Error updating lesson progress:', error);
+    }
+  };
+
+  useEffect(() => {
+    async function fetchData() {
+      if (!lessonId) {
+        setError('Invalid lesson ID');
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        setIsLoading(true);
+        setError(null);
+        
+        const token = getToken();
+        const headers = {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          ...(token && { 'Authorization': `Bearer ${token}` })
+        };
+
+        // Fetch lesson and navigation info in parallel
+        const [lessonResponse, navigationResponse] = await Promise.all([
+          fetch(`http://localhost:8000/lessons/${lessonId}`, { headers }),
+          fetch(`http://localhost:8000/lessons/${lessonId}/navigation`, { headers })
+        ]);
+
+        if (!lessonResponse.ok) {
+          throw new Error(`Failed to fetch lesson: ${lessonResponse.status}`);
+        }
+
+        const lessonData = await lessonResponse.json();
+        const navigationData = await navigationResponse.json();
+
+        // Check if lesson is premium and user has access
+        if (lessonData.is_premium && (!user || !('is_premium' in user) || !user.is_premium)) {
+          setError('This is a premium lesson. Please upgrade to access this content.');
+          setIsLoading(false);
+          return;
+        }
+
+        setLesson(lessonData);
+        setNavigation(navigationData);
+
+        // Fetch lesson progress if user is authenticated
+        if (user && token) {
+          const progressResponse = await fetch(`http://localhost:8000/lessons/${lessonId}/progress`, {
+            headers
+          });
+
+          if (progressResponse.ok) {
+            const progressData = await progressResponse.json();
+            setProgress(progressData);
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching lesson:', error);
+        setError(
+          error instanceof Error 
+            ? `Failed to load lesson: ${error.message}`
+            : 'Failed to load lesson. Please try again later.'
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    fetchData();
+  }, [lessonId, user, getToken]);
+
+  return (
+    <ProtectedRoute>
+      <main className="max-w-4xl mx-auto p-8">
+        {isLoading && (
+          <div className="flex items-center justify-center">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+            <p className="ml-2">Loading lesson...</p>
+          </div>
+        )}
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative">
+            <p className="font-medium">Error</p>
+            <p>{error}</p>
+            {error.includes('premium') && (
+              <div className="mt-4">
+                <Link 
+                  href="/pricing" 
+                  className="inline-block bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition-colors"
+                >
+                  View Pricing Options
+                </Link>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!isLoading && !error && lesson && (
+          <>
+            <LessonHeader lesson={lesson} progress={progress} />
+            <LessonContentDisplay lesson={lesson} />
+            <ResourceSection lessonId={lessonId} />
+            {navigation && <LessonNavigation navigation={navigation} />}
+            
+            {/* Progress Tracking Button */}
+            {user && !progress?.is_completed && (
+              <div className="mt-8 text-center">
+                <button
+                  onClick={() => updateLessonProgress(true)}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
+                >
+                  Mark Lesson as Completed
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+    </ProtectedRoute>
+  );
+}
+
+================
+File: frontend/app/lessons/page.tsx
+================
+// frontend/app/lessons/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
+
+interface Lesson {
+  id: number;
+  title: string;
+  description: string;
+  is_premium: boolean;
+  order: number;
+}
+
+function LessonCard({ lesson }: { lesson: Lesson }) {
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow duration-300">
+      {/* Card Header with Premium Badge */}
+      <div className="p-4 border-b border-gray-100">
+        <div className="flex justify-between items-start">
+          <h2 className="text-xl font-semibold text-gray-800">{lesson.title}</h2>
+          {lesson.is_premium && (
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r from-yellow-200 to-yellow-100 text-yellow-700">
+              Premium
+            </span>
+          )}
+        </div>
+      </div>
+      
+      {/* Card Body */}
+      <div className="p-4">
+        <p className="text-gray-600">{lesson.description}</p>
+      </div>
+      
+      {/* Card Footer */}
+      <div className="px-4 py-3 bg-gray-50 flex justify-between items-center">
+        <span className="text-sm text-gray-500">
+          Lesson {lesson.order}
+        </span>
+        <Link 
+          href={`/lessons/${lesson.id}`}
+          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+        >
+          Start Lesson
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+export default function LessonsPage() {
+  const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    async function fetchLessons() {
+      try {
+        const response = await fetch('http://localhost:8000/lessons');
+        const data = await response.json();
+        setLessons(data.lessons);
+        setIsLoading(false);
+      } catch (error) {
+        console.error('Error fetching lessons:', error);
+        setIsLoading(false);
+      }
+    }
+
+    fetchLessons();
+  }, []);
+
+  if (isLoading) {
+    return (
+      <div className="p-8">
+        <p>Loading lessons...</p>
+      </div>
+    );
+  }
+
+  return (
+    <main className="max-w-7xl mx-auto p-8">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Available Lessons</h1>
+        <p className="text-gray-600">Start your learning journey with our comprehensive Spark tutorials.</p>
+      </div>
+      
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {lessons.map((lesson) => (
+          <LessonCard key={lesson.id} lesson={lesson} />
+        ))}
+      </div>
+    </main>
+  );
+}
+
+================
+File: frontend/app/login/page.tsx
+================
+// frontend/app/login/page.tsx
+'use client';
+
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/contexts/AuthContext';
+import GoogleLoginButton from '@/components/GoogleLoginButton';
+
+export default function LoginPage() {
+  const { user, isLoading } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    // If user is already logged in, redirect to home or saved redirect URL
+    if (user && !isLoading) {
+      const redirectUrl = sessionStorage.getItem('redirectUrl') || '/';
+      sessionStorage.removeItem('redirectUrl'); // Clear the saved URL
+      router.push(redirectUrl);
+    }
+  }, [user, isLoading, router]);
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <p className="ml-2">Loading...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="max-w-md w-full p-8 bg-white rounded-lg shadow-lg">
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            Welcome to Spark Tutorial
+          </h1>
+          <p className="text-gray-600">
+            Sign in to access your learning journey
+          </p>
+        </div>
+
+        <div className="space-y-4">
+          <GoogleLoginButton />
+          
+          <div className="mt-6 text-center text-sm text-gray-600">
+            <p>
+              By signing in, you agree to our{' '}
+              <a href="/terms" className="text-blue-600 hover:underline">
+                Terms of Service
+              </a>{' '}
+              and{' '}
+              <a href="/privacy" className="text-blue-600 hover:underline">
+                Privacy Policy
+              </a>
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+================
+File: frontend/app/globals.css
+================
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
+               Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 
+               'Helvetica Neue', sans-serif;
+}
+
+================
+File: frontend/app/layout.tsx
+================
+// frontend/app/layout.tsx
+import type { Metadata } from "next";
+import { AuthProvider } from './contexts/AuthContext';
+import NavHeader from './components/NavHeader';
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Spark Tutorial Platform",
+  description: "Learn Apache Spark with interactive tutorials",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body className="min-h-screen bg-gray-50">
+        <AuthProvider>
+          <div className="flex flex-col min-h-screen">
+            <NavHeader />
+            <main className="flex-grow">
+              {children}
+            </main>
+          </div>
+        </AuthProvider>
+      </body>
+    </html>
+  );
+}
+
+================
+File: frontend/app/page.tsx
+================
+// frontend/app/page.tsx
+'use client';
+
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
+import type { Course } from './types';
+
+function CourseCard({ course }: { course: Course }) {
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow duration-300">
+      <div className="p-4 border-b border-gray-100">
+        <div className="flex justify-between items-start">
+          <h2 className="text-xl font-semibold text-gray-800">{course.title}</h2>
+          {course.is_premium && (
+            <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r from-yellow-200 to-yellow-100 text-yellow-700">
+              Premium
+            </span>
+          )}
+        </div>
+      </div>
+      
+      <div className="p-4">
+        <p className="text-gray-600">{course.description}</p>
+      </div>
+      
+      <div className="px-4 py-3 bg-gray-50 flex justify-between items-center">
+        <span className="text-sm text-gray-500">
+          Course {course.order}
+        </span>
+        <Link 
+          href={`/courses/${course.id}`}
+          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+        >
+          View Course
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+export default function HomePage() {
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    async function fetchCourses() {
+      try {
+        setError(null);
+        console.log('Attempting to fetch courses...');
+        
+        const response = await fetch('http://localhost:8000/courses', {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+          },
+        });
+        
+        console.log('Response status:', response.status);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        console.log('Received data:', data);
+        
+        setCourses(data.courses || data); // Handle both {courses: [...]} and direct array response
+      } catch (error) {
+        console.error('Error details:', error);
+        setError(
+          error instanceof Error 
+            ? `Failed to load courses: ${error.message}` 
+            : 'Failed to load courses. Please ensure the backend server is running.'
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    fetchCourses();
+  }, []);
+
+  if (isLoading) {
+    return (
+      <div className="p-8">
+        <div className="flex items-center justify-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+          <p className="ml-2">Loading courses...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="p-8">
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded relative">
+          <p className="font-medium">Error</p>
+          <p className="text-sm">{error}</p>
+          <p className="text-sm mt-2">
+            Please ensure:
+            <ul className="list-disc ml-5 mt-1">
+              <li>The backend server is running on port 8000</li>
+              <li>You can access http://localhost:8000/courses in your browser</li>
+              <li>Your network connection is stable</li>
+            </ul>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <main className="max-w-7xl mx-auto p-8">
+      <div className="mb-8">
+        <h1 className="text-4xl font-bold text-gray-900 mb-4">
+          Welcome to Spark Tutorial
+        </h1>
+        <p className="text-xl text-gray-600 mb-8">
+          Start your learning journey with our comprehensive Apache Spark courses
+        </p>
+      </div>
+      
+      {courses.length === 0 ? (
+        <div className="text-center py-8">
+          <p className="text-gray-600">No courses available at the moment.</p>
+        </div>
+      ) : (
+        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {courses.map((course) => (
+            <CourseCard key={course.id} course={course} />
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
+
+================
+File: frontend/app/types.ts
+================
+// frontend/app/types.ts
+
+// Course related types
+export enum CourseCategory {
+  SPARK = 'spark',
+  API = 'api',
+  PYTHON = 'python',
+  DATA_SCIENCE = 'data_science',
+  WEB_DEVELOPMENT = 'web_development'
+}
+
+export enum ContentFormat {
+  CODE = 'code',
+  TEXT = 'text',
+  VIDEO = 'video',
+  EXERCISE = 'exercise',
+  QUIZ = 'quiz',
+  API_PLAYGROUND = 'api_playground',
+  INTERACTIVE_DEMO = 'interactive_demo'
+}
+
+export enum DifficultyLevel {
+  BEGINNER = 'beginner',
+  INTERMEDIATE = 'intermediate',
+  ADVANCED = 'advanced'
+}
+
+export interface Course {
+  id: number;
+  title: string;
+  description: string;
+  order: number;
+  is_premium: boolean;
+  category: CourseCategory;
+  tags: string[];
+  prerequisites: string[];
+  target_audience: string;
+  learning_outcomes: string[];
+  supported_content_formats: ContentFormat[];
+  metadata: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+// Lesson related types
+export interface Lesson {
+  id: number;
+  title: string;
+  description: string;
+  content: string;
+  content_sections?: string | string[];
+  code_samples?: string | string[];
+  key_points?: string;
+  order: number;
+  difficulty: DifficultyLevel;
+  lesson_type: string;
+  estimated_time: number;
+  learning_objectives: string;
+  is_premium: boolean;
+  course_id: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContentSection {
+  title: string;
+  content: string;
+  type: ContentFormat;
+  order: number;
+}
+
+export interface CodeSample {
+  title: string;
+  language: string;
+  code: string;
+  description?: string;
+}
+
+// User related types
+export interface User {
+  id: number;
+  email: string;
+  name: string | null;
+  picture: string | null;
+  is_premium: boolean;
+}
+
+// Progress tracking types
+export interface LessonProgress {
+  lesson_id: number;
+  is_completed: boolean;
+  completed_at: string | null;
+}
+
+export interface CourseProgress {
+  course_id: number;
+  completed_lessons: number;
+  total_lessons: number;
+  last_accessed: string;
+}
+
+// Navigation types
+export interface NavigationInfo {
+  previous: {
+    id: number;
+    title: string;
+  } | null;
+  next: {
+    id: number;
+    title: string;
+  } | null;
+}
+
+// Resource types
+export interface Resource {
+  id: number;
+  title: string;
+  type: string;
+  content: string;
+  description?: string;
+  lesson_id: number;
+}
+
+export interface UserProgress {
+  lesson_id: number;
+  is_completed: boolean;
+  completed_at?: string | null;
+}
+
+export interface NavigationInfo {
+  previous: {
+    id: number;
+    title: string;
+  } | null;
+  next: {
+    id: number;
+    title: string;
+  } | null;
+}
+
+================
+File: frontend/public/file.svg
+================
+<svg fill="none" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 13.5V5.41a1 1 0 0 0-.3-.7L9.8.29A1 1 0 0 0 9.08 0H1.5v13.5A2.5 2.5 0 0 0 4 16h8a2.5 2.5 0 0 0 2.5-2.5m-1.5 0v-7H8v-5H3v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1M9.5 5V2.12L12.38 5zM5.13 5h-.62v1.25h2.12V5zm-.62 3h7.12v1.25H4.5zm.62 3h-.62v1.25h7.12V11z" clip-rule="evenodd" fill="#666" fill-rule="evenodd"/></svg>
+
+================
+File: frontend/public/globe.svg
+================
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><g clip-path="url(#a)"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.27 14.1a6.5 6.5 0 0 0 3.67-3.45q-1.24.21-2.7.34-.31 1.83-.97 3.1M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16m.48-1.52a7 7 0 0 1-.96 0H7.5a4 4 0 0 1-.84-1.32q-.38-.89-.63-2.08a40 40 0 0 0 3.92 0q-.25 1.2-.63 2.08a4 4 0 0 1-.84 1.31zm2.94-4.76q1.66-.15 2.95-.43a7 7 0 0 0 0-2.58q-1.3-.27-2.95-.43a18 18 0 0 1 0 3.44m-1.27-3.54a17 17 0 0 1 0 3.64 39 39 0 0 1-4.3 0 17 17 0 0 1 0-3.64 39 39 0 0 1 4.3 0m1.1-1.17q1.45.13 2.69.34a6.5 6.5 0 0 0-3.67-3.44q.65 1.26.98 3.1M8.48 1.5l.01.02q.41.37.84 1.31.38.89.63 2.08a40 40 0 0 0-3.92 0q.25-1.2.63-2.08a4 4 0 0 1 .85-1.32 7 7 0 0 1 .96 0m-2.75.4a6.5 6.5 0 0 0-3.67 3.44 29 29 0 0 1 2.7-.34q.31-1.83.97-3.1M4.58 6.28q-1.66.16-2.95.43a7 7 0 0 0 0 2.58q1.3.27 2.95.43a18 18 0 0 1 0-3.44m.17 4.71q-1.45-.12-2.69-.34a6.5 6.5 0 0 0 3.67 3.44q-.65-1.27-.98-3.1" fill="#666"/></g><defs><clipPath id="a"><path fill="#fff" d="M0 0h16v16H0z"/></clipPath></defs></svg>
+
+================
+File: frontend/public/next.svg
+================
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 394 80"><path fill="#000" d="M262 0h68.5v12.7h-27.2v66.6h-13.6V12.7H262V0ZM149 0v12.7H94v20.4h44.3v12.6H94v21h55v12.6H80.5V0h68.7zm34.3 0h-17.8l63.8 79.4h17.9l-32-39.7 32-39.6h-17.9l-23 28.6-23-28.6zm18.3 56.7-9-11-27.1 33.7h17.8l18.3-22.7z"/><path fill="#000" d="M81 79.3 17 0H0v79.3h13.6V17l50.2 62.3H81Zm252.6-.4c-1 0-1.8-.4-2.5-1s-1.1-1.6-1.1-2.6.3-1.8 1-2.5 1.6-1 2.6-1 1.8.3 2.5 1a3.4 3.4 0 0 1 .6 4.3 3.7 3.7 0 0 1-3 1.8zm23.2-33.5h6v23.3c0 2.1-.4 4-1.3 5.5a9.1 9.1 0 0 1-3.8 3.5c-1.6.8-3.5 1.3-5.7 1.3-2 0-3.7-.4-5.3-1s-2.8-1.8-3.7-3.2c-.9-1.3-1.4-3-1.4-5h6c.1.8.3 1.6.7 2.2s1 1.2 1.6 1.5c.7.4 1.5.5 2.4.5 1 0 1.8-.2 2.4-.6a4 4 0 0 0 1.6-1.8c.3-.8.5-1.8.5-3V45.5zm30.9 9.1a4.4 4.4 0 0 0-2-3.3 7.5 7.5 0 0 0-4.3-1.1c-1.3 0-2.4.2-3.3.5-.9.4-1.6 1-2 1.6a3.5 3.5 0 0 0-.3 4c.3.5.7.9 1.3 1.2l1.8 1 2 .5 3.2.8c1.3.3 2.5.7 3.7 1.2a13 13 0 0 1 3.2 1.8 8.1 8.1 0 0 1 3 6.5c0 2-.5 3.7-1.5 5.1a10 10 0 0 1-4.4 3.5c-1.8.8-4.1 1.2-6.8 1.2-2.6 0-4.9-.4-6.8-1.2-2-.8-3.4-2-4.5-3.5a10 10 0 0 1-1.7-5.6h6a5 5 0 0 0 3.5 4.6c1 .4 2.2.6 3.4.6 1.3 0 2.5-.2 3.5-.6 1-.4 1.8-1 2.4-1.7a4 4 0 0 0 .8-2.4c0-.9-.2-1.6-.7-2.2a11 11 0 0 0-2.1-1.4l-3.2-1-3.8-1c-2.8-.7-5-1.7-6.6-3.2a7.2 7.2 0 0 1-2.4-5.7 8 8 0 0 1 1.7-5 10 10 0 0 1 4.3-3.5c2-.8 4-1.2 6.4-1.2 2.3 0 4.4.4 6.2 1.2 1.8.8 3.2 2 4.3 3.4 1 1.4 1.5 3 1.5 5h-5.8z"/></svg>
+
+================
+File: frontend/public/vercel.svg
+================
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1155 1000"><path d="m577.3 0 577.4 1000H0z" fill="#fff"/></svg>
+
+================
+File: frontend/public/window.svg
+================
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill-rule="evenodd" clip-rule="evenodd" d="M1.5 2.5h13v10a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM0 1h16v11.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 0 12.5zm3.75 4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5M7 4.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0m1.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5" fill="#666"/></svg>
+
+================
+File: frontend/.gitignore
+================
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+================
+File: frontend/eslint.config.mjs
+================
+import { dirname } from "path";
+import { fileURLToPath } from "url";
+import { FlatCompat } from "@eslint/eslintrc";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const compat = new FlatCompat({
+  baseDirectory: __dirname,
+});
+
+const eslintConfig = [
+  ...compat.extends("next/core-web-vitals", "next/typescript"),
+];
+
+export default eslintConfig;
+
+================
+File: frontend/next.config.ts
+================
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+};
+
+export default nextConfig;
+
+================
+File: frontend/package.json
+================
+{
+  "name": "frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "^1.1.2",
+    "@types/prismjs": "^1.26.5",
+    "lucide-react": "^0.263.1",
+    "next": "15.1.7",
+    "prismjs": "^1.29.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "recharts": "^2.15.1"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@shadcn/ui": "^0.0.4",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "eslint": "^9",
+    "eslint-config-next": "15.1.7",
+    "postcss": "^8",
+    "tailwind-merge": "^3.0.1",
+    "tailwindcss": "^3.4.1",
+    "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5"
+  }
+}
+
+================
+File: frontend/postcss.config.mjs
+================
+/** @type {import('postcss-load-config').Config} */
+const config = {
+  plugins: {
+    tailwindcss: {},
+  },
+};
+
+export default config;
+
+================
+File: frontend/README.md
+================
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+================
+File: frontend/tailwind.config.ts
+================
+import type { Config } from "tailwindcss";
+
+export default {
+  content: [
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        background: "var(--background)",
+        foreground: "var(--foreground)",
+      },
+    },
+  },
+  plugins: [],
+} satisfies Config;
+
+================
+File: frontend/tsconfig.json
+================
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./app/*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+
+================
+File: .gitignore
+================
+.env
+.env.local
+start_server_instructions.md
+
+================
+File: implementation_plan.md
+================
+Minimal Cost Structure:
+
+Essential Infrastructure (Monthly):
+
+
+DigitalOcean/Linode basic droplet: $5-10/month
+
+Start with single server setup
+Scale only when needed
+
+
+Domain & SSL: ~$15/year
+Basic Email Service (SendGrid free tier initially): $0
+
+
+Development Costs (Tools/Services):
+
+
+GitHub Free Tier: $0
+VS Code: $0
+Local development environment: $0
+
+
+Learning Platform Initial Setup:
+
+
+Frontend: Next.js (free)
+Backend: FastAPI/Flask (free)
+Database: PostgreSQL (free)
+Authentication: Auth0 free tier or custom auth
+Content Storage: Initially markdown files in repo
+
+
+Free Marketing Channels:
+
+
+Medium articles
+Dev.to posts
+Reddit (r/apachespark, r/bigdata, r/learnprogramming)
+LinkedIn posts
+GitHub discussions
+Stack Overflow engagement
+YouTube tutorials (basic setup guides)
+
+Revised Pricing Structure (Start Small):
+
+Free Tier:
+
+
+Text-based tutorials
+Basic exercises
+Community support via GitHub discussions
+Limited access to interactive notebooks
+
+
+Premium Tier (Start Low):
+
+
+Monthly: $9.99/month
+Annual: $99/year
+Features:
+
+Full course access
+Downloadable exercise files
+Private GitHub repo access
+Email support
+
+
+
+Development Phases:
+
+Phase 1 (Months 1-3):
+
+
+Basic static site with free content
+Authentication system
+Payment integration (Stripe)
+First 3 free tutorials
+
+
+Phase 2 (Months 4-6):
+
+
+Interactive notebooks (using Binder - free)
+Premium content section
+Basic user dashboard
+Email notification system
+
+
+Phase 3 (Months 7-12):
+
+
+More premium content
+Community features
+Simple analytics
+Automated email sequences
+
+Break-Even Goals:
+
+Monthly Costs: ~$15
+Premium Users needed to break even: 2
+Target for sustainable side income (Year 1):
+
+50 premium users = ~$500/month
+Minus costs: ~$485/month profit
+
+
+
+Technical Implementation Tips:
+
+Use static site generation to minimize server costs
+Leverage GitHub Pages initially if possible
+Use Jupyter notebooks with Binder for interactive content
+Implement serverless functions for minimal backend needs
+
+Content Creation Strategy:
+
+Start with written tutorials
+Add screenshots and code snippets
+Create simple video content using free tools
+Build content library gradually while working full-time
+
+Would you like me to dive deeper into any of these aspects or create a more detailed technical implementation plan for the initial phase? We could also:
+
+Design a minimal first version of the site
+Create a content creation schedule
+Set up the basic project structure
+Plan the first few tutorials
+
+================
+File: next_steps.md
+================
+Content Development
+
+Create detailed lesson content for fundamental Spark concepts
+Write clear, practical code examples
+Design hands-on exercises
+Create real-world project examples
+Develop learning paths/curriculum structure
+Create supplementary resources (cheat sheets, diagrams)
+
+
+Complete Authentication Flow
+
+Finish implementing Google OAuth callback handling
+Add protected routes in backend
+Add authentication state management in frontend
+Add logout functionality
+Test the full auth flow
+Add a welcome or dashboard page after successful login
+Show the user's information in the header to confirm they're logged in
+Add protected content that becomes accessible after login
+
+
+User Progress Tracking
+
+Implement lesson completion endpoints
+Add progress indicators to UI
+Save user's last visited lesson
+Add progress dashboard for users
+
+
+Content Management
+
+Complete the lesson viewing functionality
+Add code execution environment
+Implement resource downloads
+Add lesson navigation (prev/next)
+
+
+User Experience Improvements
+
+Add loading states
+Implement error handling
+Add breadcrumb navigation
+Add search functionality
+Improve mobile responsiveness
+
+
+Premium Content Features
+
+Implement premium content flagging
+Add payment integration
+Create premium user roles
+Add premium content access control
+
+================
+File: project_plan.md
+================
+# SparkMaster: Interactive Learning Platform
+
+## Platform Overview
+A comprehensive learning platform combining theoretical knowledge with hands-on practice for mastering Apache Spark.
+
+## Content Structure
+
+### Free Content Tier
+
+1. **Fundamentals of Apache Spark**
+   - What is Apache Spark?
+   - Understanding Big Data and Distributed Computing
+   - Spark Architecture Overview
+   - Interactive Demo: Your First Spark Application
+   
+2. **Getting Started with Spark**
+   - Setting Up Your Development Environment
+   - Using Spark Shell (Scala and PySpark)
+   - Basic Spark Concepts
+   - Interactive Lab: Writing and Running Basic Spark Jobs
+   
+3. **Introduction to Spark's Core APIs**
+   - Understanding RDDs
+   - Basic DataFrame Operations
+   - Simple Data Transformations
+   - Hands-on Exercise: Data Processing Basics
+
+### Premium Content Tier
+
+4. **Advanced Spark Programming**
+   - Deep Dive into DataFrames and Datasets
+   - Complex Data Transformations
+   - Performance Optimization
+   - Project: Building a Data Processing Pipeline
+   
+5. **Spark SQL and Data Sources**
+   - Working with Different Data Formats
+   - Advanced SQL Operations
+   - External Data Source Integration
+   - Project: Data Lake Implementation
+   
+6. **Structured Streaming**
+   - Stream Processing Fundamentals
+   - Stateful Processing
+   - Window Operations
+   - Project: Real-time Analytics Dashboard
+   
+7. **Machine Learning with Spark**
+   - MLlib Fundamentals
+   - Building ML Pipelines
+   - Model Development and Deployment
+   - Project: End-to-End ML Application
+   
+8. **Enterprise Spark Development**
+   - Production Deployment
+   - Monitoring and Optimization
+   - Security Best Practices
+   - Case Study: Enterprise Implementation
+
+## Interactive Features
+
+### Learning Environment
+- Browser-based Spark development environment
+- Pre-configured clusters for hands-on practice
+- Interactive code editor with syntax highlighting
+- Real-time code execution and output display
+
+### Labs and Projects
+- Guided hands-on exercises
+- Real-world project templates
+- Automated code validation
+- Performance metrics tracking
+
+### Progress Tracking
+- Skills assessment
+- Progress dashboard
+- Completion certificates
+- Learning path recommendations
+
+## Premium Features
+
+### Advanced Learning Tools
+- Larger compute resources for complex projects
+- Extended cluster time
+- Priority technical support
+- Code review services
+
+### Enterprise Features
+- Team management
+- Custom learning paths
+- Progress reporting
+- Integration with enterprise systems
+
+### Community and Support
+- Expert mentoring
+- Private discussion forums
+- Code review workshops
+- Industry case studies
+
+## Technical Implementation Requirements
+
+### Infrastructure
+- Kubernetes-based Spark clusters
+- Jupyter-compatible notebooks
+- Auto-scaling compute resources
+- Secure user isolation
+
+### Learning Platform
+- Interactive code editor
+- Real-time compilation
+- Output visualization
+- Progress tracking system
+
+### Content Delivery
+- Video streaming
+- Interactive documentation
+- Code snippets library
+- Project templates
+
+## Pricing Structure
+
+### Free Tier
+- Basic Spark concepts
+- Limited compute resources
+- Community support
+- Basic exercises
+
+### Individual Premium
+- Full course access
+- Extended compute resources
+- Expert support
+- All projects and exercises
+
+### Enterprise
+- Team licenses
+- Custom content
+- Dedicated support
+- Integration services
+
+## Development Roadmap
+
+### Phase 1: Core Platform
+- Basic course structure
+- Essential interactive features
+- Free content implementation
+- Basic user management
+
+### Phase 2: Premium Features
+- Advanced course content
+- Extended platform features
+- Payment integration
+- Support system
+
+### Phase 3: Enterprise Features
+- Team management
+- Custom solutions
+- Advanced analytics
+- Enterprise integration
+
+## Success Metrics
+
+### Learning Outcomes
+- Course completion rates
+- Project success rates
+- Skill assessment scores
+- User satisfaction ratings
+
+### Platform Performance
+- User engagement
+- Resource utilization
+- System reliability
+- Support effectiveness
+
+### Business Metrics
+- User acquisition
+- Premium conversion
+- Enterprise adoption
+- Revenue growth
+
+================
+File: requirements.txt
+================
+annotated-types==0.7.0
+anyio==4.8.0
+click==8.1.8
+ecdsa==0.19.0
+exceptiongroup==1.2.2
+fastapi==0.115.8
+greenlet==3.1.1
+h11==0.14.0
+idna==3.10
+passlib==1.7.4
+pyasn1==0.6.1
+pydantic==2.10.6
+pydantic_core==2.27.2
+python-jose==3.3.0
+python-multipart==0.0.20
+rsa==4.9
+six==1.17.0
+sniffio==1.3.1
+SQLAlchemy==2.0.38
+starlette==0.45.3
+typing_extensions==4.12.2
+uvicorn==0.34.0
+alembic==1.13.1  # Added for database migrations
+python-dateutil
+httpx>=0.24.0,<1.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+httpx>=0.24.0
+
+
+
+================================================================
+End of Codebase
+================================================================

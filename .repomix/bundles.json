@@ -1,0 +1,29 @@
+{
+  "bundles": {
+    "spark-tutorial-repo-v1": {
+      "name": "spark-tutorial-repo-v1",
+      "description": "v1",
+      "created": "2025-02-17T16:49:24.587Z",
+      "lastUsed": "2025-02-17T16:49:24.587Z",
+      "tags": [],
+      "files": [
+        "backend",
+        "backend/app",
+        "backend/app/__pycache__",
+        "backend/app/__init__.py",
+        "backend/app/database.py",
+        "backend/app/main.py",
+        "backend/app/models.py",
+        "backend/app/seed.py",
+        "backend/spark_tutorial.db",
+        "frontend",
+        "venv",
+        "implementation_plan.md",
+        "project_plan.md",
+        "PROJECT_SUMMARY_V2.md",
+        "PROJECT_SUMMARY.md",
+        "requirements.txt"
+      ]
+    }
+  }
+}
